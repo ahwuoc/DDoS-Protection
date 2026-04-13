@@ -5,7 +5,6 @@ use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
 use tracing::{error, info, instrument, warn};
 
-/// Xử lý 1 connection từ client: check rate limit → proxy đến backend
 #[instrument(skip_all, fields(%ip))]
 pub async fn handle_connection(
     mut client: TcpStream,
@@ -15,7 +14,6 @@ pub async fn handle_connection(
 ) {
     let _ = client.set_nodelay(true);
 
-    // Kiểm tra rate limit / ban
     match tracker.check_and_track(&ip) {
         CheckResult::BannedPermanently(reason) => {
             ConnectionTracker::persist_ban(&ip).await;

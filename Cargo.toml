@@ -6,12 +6,9 @@ edition = "2024"
 [dependencies]
 chrono = "0.4.44"
 dashmap = "6.1.0"
-libc = "0.2.184"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-mnl = "0.3.1"
-nftnl = "0.9.1"
+nftables = "0.6.3"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 tokio = { version = "1.51.1", features = ["full"] }
 tracing = "0.1.44"
-
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

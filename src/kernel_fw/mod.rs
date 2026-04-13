@@ -1,180 +1,225 @@
-use std::ffi::CString;
+use std::borrow::Cow;
 use std::net::Ipv4Addr;
 
-use nftnl::expr::{Bitwise, Cmp, CmpOp};
-use nftnl::set::Set;
-use nftnl::{Batch, Chain, FinalizedBatch, ProtoFamily, Rule, Table, nft_expr};
+use nftables::batch::Batch;
+use nftables::expr::{CT, Expression, NamedExpression, Payload, PayloadField};
+use nftables::helper;
+use nftables::schema::*;
+use nftables::stmt;
+use nftables::types::*;
 
-const TABLE_NAME: &str = "firewall";
-const CHAIN_NAME: &str = "input";
+const TABLE: &str = "firewall";
+const CHAIN: &str = "input";
 const SET_BAN: &str = "ban_ip";
 
-// TCP header byte offset 13 = flags byte
-// Bit: CWR|ECE|URG|ACK|PSH|RST|SYN|FIN
-// SYN=0x02, ACK=0x10 → mask SYN|ACK = 0x12
-const TCP_FLAGS_OFFSET: u32 = 13;
-const TCP_FLAG_SYN: u8 = 0x02;
-const TCP_SYN_ACK_MASK: u8 = 0x12;
-const IPPROTO_TCP: u8 = 0x06;
-
-pub struct KernelFirewall {
-    pub table_name: CString,
-}
+pub struct KernelFirewall;
 
 impl KernelFirewall {
     pub fn new() -> Self {
-        let fw = Self {
-            table_name: CString::new(TABLE_NAME).unwrap(),
-        };
-        fw.setup().expect("❌ Không thể khởi tạo netfilter table");
+        let fw = Self;
+        fw.setup().expect("❌ Failed to init nftables");
         fw
     }
 
-    /// Khởi tạo table + chain + ban_ip set + rule drop banned IP
-    pub fn setup(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut batch = Batch::new();
-
-        let table = Table::new(&self.table_name, ProtoFamily::Inet);
-        batch.add(&table, nftnl::MsgType::Add);
-
-        let mut chain = Chain::new(&CString::new(CHAIN_NAME).unwrap(), &table);
-        chain.set_hook(nftnl::Hook::In, 0);
-        chain.set_policy(nftnl::Policy::Accept);
-        batch.add(&chain, nftnl::MsgType::Add);
-
-        let set = Set::<Ipv4Addr>::new(
-            &CString::new(SET_BAN).unwrap(),
-            0,
-            &table,
-            ProtoFamily::Inet,
-        );
-        batch.add(&set, nftnl::MsgType::Add);
-
-        // Rule: ip saddr ∈ ban_ip → DROP
-        let mut rule = Rule::new(&chain);
-        rule.add_expr(&nft_expr!(meta nfproto));
-        rule.add_expr(&nft_expr!(payload ipv4 saddr));
-        rule.add_expr(&nft_expr!(lookup & set));
-        rule.add_expr(&nft_expr!(verdict drop));
-        batch.add(&rule, nftnl::MsgType::Add);
-
-        send_batch(batch.finalize())?;
-        tracing::info!("✅ KernelFirewall setup: table={TABLE_NAME} chain={CHAIN_NAME}");
+    fn apply(batch: Batch) -> Result<(), Box<dyn std::error::Error>> {
+        let nft = batch.to_nftables();
+        helper::apply_ruleset(&nft)?;
         Ok(())
     }
 
-    /// Thêm IP vào kernel set → kernel DROP ngay tại netfilter
+    fn payload(protocol: &str, field: &str) -> Expression<'static> {
+        Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+            PayloadField {
+                protocol: Cow::Owned(protocol.to_string()),
+                field: Cow::Owned(field.to_string()),
+            },
+        )))
+    }
+
+    fn ct_state() -> Expression<'static> {
+        Expression::Named(NamedExpression::CT(CT {
+            key: Cow::Borrowed("state"),
+            ..Default::default()
+        }))
+    }
+
+    fn str_expr(s: &str) -> Expression<'static> {
+        Expression::String(Cow::Owned(s.to_string()))
+    }
+
+    fn match_stmt<'a>(
+        left: Expression<'a>,
+        op: stmt::Operator,
+        right: Expression<'a>,
+    ) -> stmt::Statement<'a> {
+        stmt::Statement::Match(stmt::Match { left, right, op })
+    }
+
+    fn drop_stmt<'a>() -> stmt::Statement<'a> {
+        stmt::Statement::Drop(Some(stmt::Drop {}))
+    }
+
+    fn rule_with<'a>(stmts: Vec<stmt::Statement<'a>>) -> Rule<'a> {
+        Rule {
+            family: NfFamily::INet,
+            table: Cow::Borrowed(TABLE),
+            chain: Cow::Borrowed(CHAIN),
+            expr: Cow::Owned(stmts),
+            ..Default::default()
+        }
+    }
+
+    // ── Setup: table + chain + ban_ip set + drop rule ───────
+    pub fn setup(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut batch = Batch::new();
+
+        batch.add(NfListObject::Table(Table {
+            family: NfFamily::INet,
+            name: Cow::Borrowed(TABLE),
+            ..Default::default()
+        }));
+
+        batch.add(NfListObject::Chain(Chain {
+            family: NfFamily::INet,
+            table: Cow::Borrowed(TABLE),
+            name: Cow::Borrowed(CHAIN),
+            _type: Some(NfChainType::Filter),
+            hook: Some(NfHook::Input),
+            prio: Some(0),
+            policy: Some(NfChainPolicy::Accept),
+            ..Default::default()
+        }));
+
+        batch.add(NfListObject::Set(Box::new(Set {
+            family: NfFamily::INet,
+            table: Cow::Borrowed(TABLE),
+            name: Cow::Borrowed(SET_BAN),
+            set_type: SetTypeValue::Single(SetType::Ipv4Addr),
+            ..Default::default()
+        })));
+
+        // ip saddr @ban_ip → drop
+        batch.add(NfListObject::Rule(Self::rule_with(vec![
+            Self::match_stmt(
+                Self::payload("ip", "saddr"),
+                stmt::Operator::IN,
+                Self::str_expr(&format!("@{SET_BAN}")),
+            ),
+            Self::drop_stmt(),
+        ])));
+
+        Self::apply(batch)?;
+        tracing::info!("✅ KernelFirewall setup: table={TABLE} chain={CHAIN}");
+        Ok(())
+    }
+
+    // ── Ban IP ──────────────────────────────────────────────
     pub fn ban(&self, ip: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>> {
         let mut batch = Batch::new();
-        let table = Table::new(&self.table_name, ProtoFamily::Inet);
-        let mut set = Set::<Ipv4Addr>::new(
-            &CString::new(SET_BAN).unwrap(),
-            0,
-            &table,
-            ProtoFamily::Inet,
-        );
-        set.add(&ip);
-        batch.add_iter(set.elems_iter(), nftnl::MsgType::Add);
-        send_batch(batch.finalize())?;
+        batch.add(NfListObject::Element(Element {
+            family: NfFamily::INet,
+            table: Cow::Borrowed(TABLE),
+            name: Cow::Borrowed(SET_BAN),
+            elem: Cow::Owned(vec![Self::str_expr(&ip.to_string())]),
+        }));
+        Self::apply(batch)?;
         tracing::info!("🚫 Kernel ban: {ip}");
         Ok(())
     }
 
+    // ── Unban IP ────────────────────────────────────────────
     pub fn unban(&self, ip: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>> {
         let mut batch = Batch::new();
-        let table = Table::new(&self.table_name, ProtoFamily::Inet);
-        let mut set = Set::<Ipv4Addr>::new(
-            &CString::new(SET_BAN).unwrap(),
-            0,
-            &table,
-            ProtoFamily::Inet,
-        );
-        set.add(&ip);
-        batch.add_iter(set.elems_iter(), nftnl::MsgType::Del);
-        send_batch(batch.finalize())?;
+        batch.delete(NfListObject::Element(Element {
+            family: NfFamily::INet,
+            table: Cow::Borrowed(TABLE),
+            name: Cow::Borrowed(SET_BAN),
+            elem: Cow::Owned(vec![Self::str_expr(&ip.to_string())]),
+        }));
+        Self::apply(batch)?;
         tracing::info!("✅ Kernel unban: {ip}");
         Ok(())
     }
 
-    pub fn add_syn_flood_protection(
-        &self,
-        _max_syn_per_sec: u32, // dùng cho logging, rate limit thực tế ở tầng userspace
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut batch = Batch::new();
-        let table = Table::new(&self.table_name, ProtoFamily::Inet);
-        let chain = Chain::new(&CString::new(CHAIN_NAME).unwrap(), &table);
-
-        let mut rule = Rule::new(&chain);
-
-        rule.add_expr(&nft_expr!(payload_raw nh 9, 1));
-        rule.add_expr(&Cmp::new(CmpOp::Eq, IPPROTO_TCP));
-        rule.add_expr(&nft_expr!(payload_raw th TCP_FLAGS_OFFSET, 1));
-        rule.add_expr(&Bitwise::new(&[TCP_SYN_ACK_MASK][..], &[0x00u8][..]));
-        rule.add_expr(&Cmp::new(CmpOp::Eq, TCP_FLAG_SYN));
-        rule.add_expr(&nft_expr!(ct state));
-        rule.add_expr(&nft_expr!(bitwise mask 0x01u32, xor 0x00u32));
-        rule.add_expr(&nft_expr!(cmp != 0x00u32));
-        rule.add_expr(&nft_expr!(verdict drop));
-
-        batch.add(&rule, nftnl::MsgType::Add);
-        send_batch(batch.finalize())?;
-        tracing::info!("✅ SYN invalid-state drop rule added");
-        Ok(())
-    }
-
+    // ── Drop invalid conntrack state ────────────────────────
     pub fn add_invalid_drop(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut batch = Batch::new();
-        let table = Table::new(&self.table_name, ProtoFamily::Inet);
-        let chain = Chain::new(&CString::new(CHAIN_NAME).unwrap(), &table);
-
-        let mut rule = Rule::new(&chain);
-        rule.add_expr(&nft_expr!(ct state));
-        rule.add_expr(&nft_expr!(bitwise mask 0x01u32, xor 0x00u32));
-        rule.add_expr(&nft_expr!(cmp != 0x00u32));
-        rule.add_expr(&nft_expr!(verdict drop));
-        batch.add(&rule, nftnl::MsgType::Add);
-
-        send_batch(batch.finalize())?;
+        batch.add(NfListObject::Rule(Self::rule_with(vec![
+            Self::match_stmt(
+                Self::ct_state(),
+                stmt::Operator::EQ,
+                Self::str_expr("invalid"),
+            ),
+            Self::drop_stmt(),
+        ])));
+        Self::apply(batch)?;
         tracing::info!("✅ Invalid packet drop rule added");
         Ok(())
     }
 
+    // ── SYN flood: drop pure SYN + invalid ct ───────────────
+    pub fn add_syn_flood_protection(
+        &self,
+        _max_syn_per_sec: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut batch = Batch::new();
+        batch.add(NfListObject::Rule(Self::rule_with(vec![
+            Self::match_stmt(
+                Self::payload("tcp", "flags"),
+                stmt::Operator::IN,
+                Self::str_expr("syn"),
+            ),
+            Self::match_stmt(
+                Self::ct_state(),
+                stmt::Operator::EQ,
+                Self::str_expr("invalid"),
+            ),
+            Self::drop_stmt(),
+        ])));
+        Self::apply(batch)?;
+        tracing::info!("✅ SYN flood protection rule added");
+        Ok(())
+    }
+
+    // ── Allow only TCP on specific port ─────────────────────
     pub fn add_allow_only_tcp_port(&self, port: u16) -> Result<(), Box<dyn std::error::Error>> {
         let mut batch = Batch::new();
-        let table = Table::new(&self.table_name, ProtoFamily::Inet);
-        let chain = Chain::new(&CString::new(CHAIN_NAME).unwrap(), &table);
 
-        let mut rule_proto = Rule::new(&chain);
-        rule_proto.add_expr(&nft_expr!(payload_raw nh 9, 1));
-        rule_proto.add_expr(&Cmp::new(CmpOp::Neq, IPPROTO_TCP));
-        rule_proto.add_expr(&nft_expr!(verdict drop));
-        batch.add(&rule_proto, nftnl::MsgType::Add);
+        // Drop non-TCP
+        batch.add(NfListObject::Rule(Self::rule_with(vec![
+            Self::match_stmt(
+                Self::payload("ip", "protocol"),
+                stmt::Operator::NEQ,
+                Self::str_expr("tcp"),
+            ),
+            Self::drop_stmt(),
+        ])));
 
-        let mut rule_port = Rule::new(&chain);
-        rule_port.add_expr(&nft_expr!(payload_raw th 2, 2));
-        rule_port.add_expr(&Cmp::new(CmpOp::Neq, port.to_be()));
-        rule_port.add_expr(&nft_expr!(verdict drop));
-        batch.add(&rule_port, nftnl::MsgType::Add);
+        // Drop TCP not on game port
+        batch.add(NfListObject::Rule(Self::rule_with(vec![
+            Self::match_stmt(
+                Self::payload("tcp", "dport"),
+                stmt::Operator::NEQ,
+                Expression::Number(port as u32),
+            ),
+            Self::drop_stmt(),
+        ])));
 
-        send_batch(batch.finalize())?;
+        Self::apply(batch)?;
         tracing::info!("✅ Allow only TCP port {port}");
         Ok(())
     }
 
-    /// Cleanup toàn bộ table khi shutdown
+    // ── Teardown: delete entire table ───────────────────────
     pub fn teardown(&self) -> Result<(), Box<dyn std::error::Error>> {
         let mut batch = Batch::new();
-        let table = Table::new(&self.table_name, ProtoFamily::Inet);
-        batch.add(&table, nftnl::MsgType::Del);
-        send_batch(batch.finalize())?;
-        tracing::info!("🧹 KernelFirewall teardown xong");
+        batch.delete(NfListObject::Table(Table {
+            family: NfFamily::INet,
+            name: Cow::Borrowed(TABLE),
+            ..Default::default()
+        }));
+        Self::apply(batch)?;
+        tracing::info!("🧹 KernelFirewall teardown done");
         Ok(())
     }
-}
-
-/// Gửi nftnl batch xuống kernel qua netlink socket — không CLI
-fn send_batch(batch: FinalizedBatch) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = mnl::Socket::new(mnl::Bus::Netfilter)?;
-    socket.send_all(&batch)?;
-    Ok(())
 }
