@@ -2,3 +2,5 @@
 /config.json
 banned_ips.txt
 *.log
+/scratch
+vps.txt

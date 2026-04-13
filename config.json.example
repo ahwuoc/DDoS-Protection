@@ -1,9 +1,20 @@
 {
-  "listen_addr": "0.0.0.0:14443",
-  "target_addr": "127.0.0.1:14445",
-  "max_connections_per_ip": 5,
+  "mappings": [
+    {
+      "name": "Game Port",
+      "listen_addr": "0.0.0.0:14443",
+      "target_addr": "146.190.88.68:14443"
+    },
+    {
+      "name": "Database Port",
+      "listen_addr": "0.0.0.0:3306",
+      "target_addr": "146.190.88.68:3306"
+    }
+  ],
+  "max_connections_per_ip": 10,
   "rate_limit_window_secs": 2,
-  "max_connects_per_window": 8,
-  "blacklist_duration_secs": 30,
-  "strikes_before_ban": 3
+  "max_connects_per_window": 10,
+  "blacklist_duration_secs": 60,
+  "strikes_before_ban": 3,
+  "max_syn_per_sec": 10000
 }

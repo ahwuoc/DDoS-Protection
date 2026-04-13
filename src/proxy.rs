@@ -3,40 +3,49 @@ use crate::tracker::{CheckResult, ConnectionTracker};
 use std::sync::Arc;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
-use tracing::{error, info, instrument, warn};
+use tokio::time::{Duration, timeout};
+use tracing::{debug, error, info, instrument, warn};
 
 #[instrument(skip_all, fields(%ip))]
 pub async fn handle_connection(
     mut client: TcpStream,
     ip: String,
     tracker: Arc<ConnectionTracker>,
-    config: Arc<AppConfig>,
+    _config: Arc<AppConfig>,
+    target_addr: String,
 ) {
     let _ = client.set_nodelay(true);
 
     match tracker.check_and_track(&ip) {
         CheckResult::BannedPermanently(reason) => {
             ConnectionTracker::persist_ban(&ip).await;
-            info!(reason, "🚫 Dropped (banned)");
+            info!(reason, "[-] Dropped (banned)");
             return;
         }
         CheckResult::Rejected(reason) => {
-            info!(reason, "🚫 Dropped");
+            debug!(reason, "[-] Dropped");
             return;
         }
         CheckResult::Allowed => {}
     }
 
-    info!("✅ Accepted");
-
-    // Proxy sang backend
-    match TcpStream::connect(&config.target_addr).await {
+    // connection den backend roi forward data
+    match TcpStream::connect(&target_addr).await {
         Ok(mut backend) => {
             let _ = backend.set_nodelay(true);
+            info!("Accepted connection from {ip} -> Connected to {target_addr}");
+
+            let tracker_clone = tracker.clone();
+            let ip_clone = ip.clone();
+            let wait_secs = _config.protection.whitelist_after_secs;
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(wait_secs)).await;
+                tracker_clone.mark_as_good(&ip_clone).await;
+            });
 
             match copy_bidirectional(&mut client, &mut backend).await {
                 Ok((up, down)) => {
-                    info!(up_bytes = up, down_bytes = down, "Disconnected");
+                    debug!(up_bytes = up, down_bytes = down, "Disconnected");
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -48,13 +57,11 @@ pub async fn handle_connection(
         }
         Err(e) => {
             error!(
-                target = %config.target_addr,
+                target = %target_addr,
                 error = %e,
-                "❌ Backend connection failed"
+                "[ERR] Backend connection failed"
             );
         }
     }
-
-    // Giải phóng connection counter
     tracker.release_connection(&ip);
 }
