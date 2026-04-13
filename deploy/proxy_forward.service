@@ -1,0 +1,24 @@
+[Unit]
+Description=NRO Anti-Spam TCP Proxy
+After=network.target
+
+[Service]
+Type=simple
+# Chạy với root vì cần quyền nftables
+ExecStart=/opt/proxy_forward/proxy_forward
+WorkingDirectory=/opt/proxy_forward
+Restart=always
+RestartSec=3
+
+# Giới hạn file descriptor cho nhiều connection
+LimitNOFILE=65535
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+# Environment
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

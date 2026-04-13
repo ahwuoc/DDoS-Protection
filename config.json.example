@@ -1,0 +1,9 @@
+{
+  "listen_addr": "0.0.0.0:14443",
+  "target_addr": "127.0.0.1:14445",
+  "max_connections_per_ip": 5,
+  "rate_limit_window_secs": 2,
+  "max_connects_per_window": 8,
+  "blacklist_duration_secs": 30,
+  "strikes_before_ban": 3
+}

@@ -1,0 +1,4 @@
+/target
+/config.json
+banned_ips.txt
+*.log
