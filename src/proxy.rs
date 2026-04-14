@@ -6,51 +6,51 @@ use tokio::net::TcpStream;
 use tokio::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
 
-#[instrument(skip_all, fields(%ip))]
+use anyhow::Result;
+use std::net::IpAddr;
+
+#[instrument(skip_all, fields(ip = %ip))]
 pub async fn handle_connection(
     mut client: TcpStream,
-    ip: String,
+    ip: IpAddr,
     tracker: Arc<ConnectionTracker>,
     _config: Arc<AppConfig>,
     target_ip: String,
     mapping: Mapping,
     server_allowed: Option<Vec<String>>,
-) {
+) -> Result<()> {
+    let ip_str = ip.to_string();
     let _ = client.set_nodelay(true);
 
-    // Ưu tiên mapping allowed, sau đó đến server allowed
-    let effective_allowed = mapping
-        .allowed_countries
-        .as_ref()
-        .or(server_allowed.as_ref());
-
-    match tracker.check_and_track(&ip, effective_allowed) {
+    match tracker.check_and_track(ip, server_allowed.as_ref()) {
         CheckResult::BannedPermanently(reason) => {
-            ConnectionTracker::persist_ban(&ip).await;
+            ConnectionTracker::persist_ban(&ip_str).await;
             info!(reason, "[-] Dropped (banned)");
-            return;
+            return Ok(());
         }
         CheckResult::Rejected(reason) => {
             debug!(reason, "[-] Dropped");
-            return;
+            return Ok(());
         }
         CheckResult::Allowed => {}
     }
 
     let target_addr = format!("{}:{}", target_ip, mapping.target_port);
-    // connection den backend roi forward data
     match TcpStream::connect(&target_addr).await {
         Ok(mut backend) => {
             let _ = backend.set_nodelay(true);
-            let info = tracker.get_ip_info(&ip);
-            info!("Accepted connection from {ip} [{} | {}] -> Connected to {target_addr}", info.country, info.asn_org);
+            let info = tracker.get_ip_info(ip);
+            info!(
+                "Accepted connection from {ip} [{} | {}] -> Connected to {target_addr}",
+                info.country, info.asn_org
+            );
 
             let tracker_clone = tracker.clone();
-            let ip_clone = ip.clone();
+            let ip_clone = ip;
             let wait_secs = _config.protection.whitelist_after_secs;
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(wait_secs)).await;
-                tracker_clone.mark_as_good(&ip_clone).await;
+                tracker_clone.mark_as_good(ip_clone).await;
             });
 
             match copy_bidirectional(&mut client, &mut backend).await {
@@ -73,5 +73,6 @@ pub async fn handle_connection(
             );
         }
     }
-    tracker.release_connection(&ip);
+    tracker.release_connection(ip);
+    Ok(())
 }

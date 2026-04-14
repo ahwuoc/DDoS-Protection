@@ -9,7 +9,6 @@ pub struct Mapping {
     pub name: String,
     pub listen_addr: String,
     pub target_port: u16,
-    pub allowed_countries: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,24 +59,19 @@ pub struct GeoConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            servers: vec![ServerConfig {
-                target_ip: "146.190.88.68".to_string(),
-                allowed_countries: Some(vec!["VN".to_string(), "JP".to_string(), "US".to_string()]),
-                mappings: vec![
-                    Mapping {
-                        name: "Game Port".to_string(),
-                        listen_addr: "0.0.0.0:14443".to_string(),
-                        target_port: 14443,
-                        allowed_countries: None,
-                    },
-                    Mapping {
-                        name: "Database Port".to_string(),
-                        listen_addr: "0.0.0.0:3306".to_string(),
-                        target_port: 3306,
-                        allowed_countries: Some(vec!["VN".to_string()]),
-                    },
-                ],
-            }],
+            servers: vec![
+                ServerConfig {
+                    target_ip: "127.0.0.1".to_string(),
+                    allowed_countries: Some(vec!["VN".to_string()]),
+                    mappings: vec![
+                        Mapping {
+                            name: "Game Port".to_string(),
+                            listen_addr: "0.0.0.0:14443".to_string(),
+                            target_port: 14443,
+                        }
+                    ],
+                }
+            ],
             connection: ConnectionConfig {
                 max_connections_per_ip: 5,
             },

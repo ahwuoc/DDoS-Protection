@@ -1,3 +1,4 @@
+use anyhow::Result;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -7,7 +8,7 @@ use proxy_forward::proxy;
 use proxy_forward::tracker::ConnectionTracker;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -83,8 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     match listener.accept().await {
                         Ok((socket, addr)) => {
-                            let ip = addr.ip().to_string();
-                            if tracker.is_permanently_banned(&ip) {
+                            let ip = addr.ip();
+                            if tracker.is_permanently_banned(ip) {
                                 drop(socket);
                                 continue;
                             }
@@ -95,15 +96,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let target_ip = target_ip.clone();
                             let server_allowed = server_allowed.clone();
                             
-                            tokio::spawn(proxy::handle_connection(
-                                socket,
-                                ip,
-                                tracker,
-                                config,
-                                target_ip,
-                                mapping,
-                                server_allowed,
-                            ));
+                            tokio::spawn(async move {
+                                if let Err(e) = proxy::handle_connection(
+                                    socket,
+                                    ip,
+                                    tracker,
+                                    config,
+                                    target_ip,
+                                    mapping,
+                                    server_allowed,
+                                ).await {
+                                    error!(error = %e, "Connection error");
+                                }
+                            });
                         }
                         Err(e) => {
                             error!(name = %mapping.name, error = %e, "Accept error");

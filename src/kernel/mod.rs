@@ -201,6 +201,16 @@ impl KernelFirewall {
             Self::accept_stmt(),
         ])));
 
+        // drop banned ip
+        batch.add(NfListObject::Rule(Self::rule_with(vec![
+            Self::match_stmt(
+                Self::payload("ip", "saddr"),
+                stmt::Operator::IN,
+                Self::str_expr(&format!("@{SET_BAN}")),
+            ),
+            Self::drop_stmt(),
+        ])));
+
         // allow proxy dport ? cai nay la port game open
         for port in listen_ports {
             batch.add(NfListObject::Rule(Self::rule_with(vec![
@@ -212,16 +222,6 @@ impl KernelFirewall {
                 Self::accept_stmt(),
             ])));
         }
-
-        // drop banned ip
-        batch.add(NfListObject::Rule(Self::rule_with(vec![
-            Self::match_stmt(
-                Self::payload("ip", "saddr"),
-                stmt::Operator::IN,
-                Self::str_expr(&format!("@{SET_BAN}")),
-            ),
-            Self::drop_stmt(),
-        ])));
 
         Self::apply(batch)?;
         tracing::info!("[OK] KernelFirewall setup: table={TABLE} chain={CHAIN}");
