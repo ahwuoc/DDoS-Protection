@@ -1,0 +1,18 @@
+[package]
+name = "network_stress_tool"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+colored = "3.1.1"
+inquire = "0.9.4"
+ipnetwork = "0.21.1"
+pnet = "0.35.0"
+pnet_base = "0.35.0"
+pnet_datalink = "0.35.0"
+pnet_macros = "0.35.0"
+pnet_packet = "0.35.0"
+pnet_transport = "0.35.0"
+rand = "0.10.0"
+tokio = { version = "1.49.0", features = ["full"] }
