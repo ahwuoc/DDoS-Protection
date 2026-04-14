@@ -9,3 +9,21 @@ vps.txt
 GeoLite2*
 whitelist_ips.txt
 licensekey.txt
+
+# Build artifacts
+ready_to_deploy/
+debug/
+release/
+*.exe
+*.so
+*.dylib
+*.dll
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Storey

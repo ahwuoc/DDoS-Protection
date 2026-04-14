@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use notify::{RecursiveMode, Watcher};
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,94 +9,170 @@ use proxy_forward::config::AppConfig;
 use proxy_forward::kernel::KernelFirewall;
 use proxy_forward::proxy;
 use proxy_forward::tracker::ConnectionTracker;
+use proxy_forward::ui;
+
+// ── CLI ─────────────────────────────────────────────────
+
+#[derive(Parser)]
+#[command(name = "proxy-forward")]
+#[command(about = "Anti-Spam Proxy & Firewall Manager")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start proxy server (default)
+    Run,
+    /// Open interactive control panel
+    Menu,
+}
+
+// ── Main ────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("info".parse().unwrap()),
-        )
-        .with_target(false)
-        .init();
+    let cli = Cli::parse();
+    let is_menu = matches!(cli.command, Some(Commands::Menu));
+    init_logging(is_menu);
 
-    info!("[*] Starting NRO Multi-Port Anti-Spam Proxy ...");
+    info!("Starting NRO Multi-Port Anti-Spam Proxy...");
+
     let config = Arc::new(AppConfig::load());
-    let mut listen_ports = Vec::new();
-    for server in &config.servers {
-        for mapping in &server.mappings {
-            if let Some(port) = mapping
-                .listen_addr
-                .rsplit(":")
-                .next()
-                .and_then(|p| p.parse::<u16>().ok())
-            {
-                listen_ports.push(port);
-            }
-        }
-    }
+    let listen_ports = collect_listen_ports(&config);
 
-    // kernel
-    info!(
-        "Khởi tạo Kernel Firewall cho {} cổng...",
-        listen_ports.len()
-    );
-    let kernel_fw = Arc::new(KernelFirewall::new(listen_ports.clone()));
-
-    if let Err(e) = kernel_fw.add_invalid_drop() {
-        warn!("[WARN] Rule drop invalid packet: {e}");
-    }
-    if let Err(e) =
-        kernel_fw.add_syn_flood_protection(listen_ports.clone(), config.protection.max_syn_per_sec)
-    {
-        warn!("[WARN] SYN flood protection: {e}");
-    }
-
-    info!(
-        "[OK] Kernel firewall rules applied to ports: {:?}",
-        listen_ports
-    );
-
+    let kernel_fw = Arc::new(init_firewall(&listen_ports, &config));
     let tracker = Arc::new(ConnectionTracker::new(config.clone(), kernel_fw.clone()));
     tracker.spawn_cleanup_task();
 
-    // Hot-reloading setup
+    spawn_config_watcher(tracker.clone());
+    spawn_proxy_listeners(&config, tracker.clone());
+
+    // Dispatch by CLI command
+    match cli.command {
+        Some(Commands::Menu) => {
+            let menu_tracker = tracker.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = ui::run_menu(menu_tracker) {
+                    error!("Menu error: {e}");
+                }
+            })
+            .await?;
+        }
+        _ => {
+            // Default: run proxy, wait for Ctrl+C
+            tokio::signal::ctrl_c().await?;
+            info!("Shutdown signal received");
+        }
+    }
+
+    // Cleanup
+    if let Err(e) = kernel_fw.teardown() {
+        error!("Teardown failed: {e}");
+    } else {
+        info!("Kernel firewall cleaned up");
+    }
+
+    Ok(())
+}
+
+// ── Initialization helpers ──────────────────────────────
+
+fn init_logging(menu_mode: bool) {
+    let filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("info".parse().unwrap());
+    if menu_mode {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("proxy.log")
+            .unwrap();
+        
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_ansi(false)
+            .with_writer(file)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+    }
+}
+
+fn collect_listen_ports(config: &AppConfig) -> Vec<u16> {
+    config
+        .servers
+        .iter()
+        .flat_map(|s| &s.mappings)
+        .filter_map(|m| m.listen_addr.rsplit(':').next()?.parse().ok())
+        .collect()
+}
+
+fn init_firewall(ports: &[u16], config: &AppConfig) -> KernelFirewall {
+    info!("Initializing Kernel Firewall for {} ports...", ports.len());
+
+    let fw = KernelFirewall::new(ports.to_vec());
+
+    if let Err(e) = fw.add_invalid_drop() {
+        warn!("Rule drop invalid packet: {e}");
+    }
+    if let Err(e) = fw.add_syn_flood_protection(ports.to_vec(), config.protection.max_syn_per_sec)
+    {
+        warn!("SYN flood protection: {e}");
+    }
+
+    info!("Kernel firewall rules applied to ports: {:?}", ports);
+    fw
+}
+
+fn spawn_config_watcher(tracker: Arc<ConnectionTracker>) {
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+    // File watcher runs on its own thread internally
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(event) = res {
             if event.kind.is_modify() {
                 let _ = tx.blocking_send(());
             }
         }
-    })?;
+    })
+    .expect("Failed to create config watcher");
 
-    watcher.watch(
-        std::path::Path::new("config.json"),
-        RecursiveMode::NonRecursive,
-    )?;
+    watcher
+        .watch(
+            std::path::Path::new("config.json"),
+            RecursiveMode::NonRecursive,
+        )
+        .expect("Failed to watch config.json");
 
-    let tracker_reload = tracker.clone();
     tokio::spawn(async move {
-        while let Some(_) = rx.recv().await {
-            // debouncing
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            while rx.try_recv().is_ok() {} // drain
+        // Keep watcher alive
+        let _watcher = watcher;
 
-            info!("[*] Config file change detected, reloading...");
+        while rx.recv().await.is_some() {
+            // Debounce: wait then drain
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            while rx.try_recv().is_ok() {}
+
+            info!("Config file changed, reloading...");
             let new_cfg = AppConfig::load();
-            tracker_reload.reload_config(Arc::new(new_cfg));
+            tracker.reload_config(Arc::new(new_cfg));
         }
     });
+}
 
-    let mut tasks = Vec::new();
-
+fn spawn_proxy_listeners(config: &AppConfig, tracker: Arc<ConnectionTracker>) {
     for server in &config.servers {
         for mapping in &server.mappings {
             let mapping = mapping.clone();
             let tracker = tracker.clone();
-            let config = config.clone();
+            let config_arc = Arc::new((**&config).clone());
             let target_ip = server.target_ip.clone();
-            let server_allowed = server.allowed_countries.clone();
+            let allowed = server.allowed_countries.clone();
 
             info!(
                 mapping = %mapping.name,
@@ -104,67 +181,56 @@ async fn main() -> Result<()> {
                 "Starting proxy task"
             );
 
-            let task = tokio::spawn(async move {
-                let listener = match tokio::net::TcpListener::bind(&mapping.listen_addr).await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        error!(name = %mapping.name, error = %e, "Failed to bind listener");
-                        return;
-                    }
-                };
-
-                loop {
-                    match listener.accept().await {
-                        Ok((socket, addr)) => {
-                            let ip = addr.ip();
-                            if tracker.is_permanently_banned(ip) {
-                                drop(socket);
-                                continue;
-                            }
-
-                            let mapping = mapping.clone();
-                            let tracker = tracker.clone();
-                            let config = config.clone();
-                            let target_ip = target_ip.clone();
-                            let server_allowed = server_allowed.clone();
-
-                            tokio::spawn(async move {
-                                if let Err(e) = proxy::handle_connection(
-                                    socket,
-                                    ip,
-                                    tracker,
-                                    config,
-                                    target_ip,
-                                    mapping,
-                                    server_allowed,
-                                )
-                                .await
-                                {
-                                    error!(error = %e, "Connection error");
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            error!(name = %mapping.name, error = %e, "Accept error");
-                        }
-                    }
-                }
+            tokio::spawn(async move {
+                run_listener(mapping, tracker, config_arc, target_ip, allowed).await;
             });
-            tasks.push(task);
         }
     }
+}
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("[*] Shutdown signal received");
+async fn run_listener(
+    mapping: proxy_forward::config::Mapping,
+    tracker: Arc<ConnectionTracker>,
+    config: Arc<AppConfig>,
+    target_ip: String,
+    allowed: Option<Vec<String>>,
+) {
+    let listener = match tokio::net::TcpListener::bind(&mapping.listen_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!(name = %mapping.name, error = %e, "Failed to bind listener");
+            return;
+        }
+    };
+
+    loop {
+        match listener.accept().await {
+            Ok((socket, addr)) => {
+                let ip = addr.ip();
+                if tracker.is_permanently_banned(ip) {
+                    drop(socket);
+                    continue;
+                }
+
+                let mapping = mapping.clone();
+                let tracker = tracker.clone();
+                let config = config.clone();
+                let target_ip = target_ip.clone();
+                let allowed = allowed.clone();
+
+                tokio::spawn(async move {
+                    if let Err(e) = proxy::handle_connection(
+                        socket, ip, tracker, config, target_ip, mapping, allowed,
+                    )
+                    .await
+                    {
+                        error!(error = %e, "Connection error");
+                    }
+                });
+            }
+            Err(e) => {
+                error!(name = %mapping.name, error = %e, "Accept error");
+            }
         }
     }
-
-    if let Err(e) = kernel_fw.teardown() {
-        error!("[ERR] Teardown failed: {e}");
-    } else {
-        info!("[OK] Kernel firewall cleaned up");
-    }
-
-    Ok(())
 }

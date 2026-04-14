@@ -1,5 +1,6 @@
 use crate::config::AppConfig;
 use crate::kernel::KernelFirewall;
+use anyhow::Result;
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, DashSet};
 use std::fs;
@@ -54,6 +55,17 @@ pub enum CheckResult {
 }
 
 pub struct IpInfo {
+    pub country: String,
+    pub asn_org: String,
+}
+
+/// Snapshot of a single tracked IP for the realtime monitor
+pub struct TrackedIpSnapshot {
+    pub ip: IpAddr,
+    pub active_connections: usize,
+    pub connects_per_min: u32,
+    pub strikes: u32,
+    pub status: String,
     pub country: String,
     pub asn_org: String,
 }
@@ -164,6 +176,31 @@ impl ConnectionTracker {
 
     pub fn is_permanently_banned(&self, ip: IpAddr) -> bool {
         self.permanent_bans.contains(&ip)
+    }
+
+    pub fn unban(&self, ip: IpAddr) -> Result<()> {
+        info!(ip = %ip, "[+] Unbanning IP...");
+        self.permanent_bans.remove(&ip);
+        if let IpAddr::V4(ipv4) = ip {
+            let _ = self.kernel_fw.unban(ipv4);
+        }
+
+        let permanent_bans = self.permanent_bans.clone();
+        tokio::spawn(async move {
+            let mut data = String::new();
+            for ban in permanent_bans.iter() {
+                data.push_str(&format!("{}\n", ban.key()));
+            }
+            if let Err(e) = tokio::fs::write(BANNED_FILE, data).await {
+                warn!("Failed to update {} after unban: {}", BANNED_FILE, e);
+            }
+        });
+
+        Ok(())
+    }
+
+    pub fn list_banned_ips(&self) -> Vec<IpAddr> {
+        self.permanent_bans.iter().map(|kv| *kv.key()).collect()
     }
 
     pub fn is_whitelisted(&self, ip: IpAddr) -> bool {
@@ -328,16 +365,22 @@ impl ConnectionTracker {
     }
 
     pub async fn persist_ban(ip: &str) {
-        let Ok(mut file) = tokio::fs::OpenOptions::new()
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let line = format!("[{}] {}\n", ts, ip);
+
+        match tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(BANNED_FILE)
             .await
-        else {
-            return;
-        };
-        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        let _ = file.write_all(format!("[{ts}] {ip}\n").as_bytes()).await;
+        {
+            Ok(mut file) => {
+                let _ = file.write_all(line.as_bytes()).await;
+            }
+            Err(e) => {
+                eprintln!("Failed to write to {}: {}", BANNED_FILE, e);
+            }
+        }
     }
 
     pub fn get_ip_info(&self, ip: IpAddr) -> IpInfo {
@@ -367,18 +410,65 @@ impl ConnectionTracker {
         }
     }
 
+    pub fn get_stats(&self) -> (usize, usize, usize) {
+        let total_active: usize = self
+            .stats
+            .iter()
+            .map(|s| s.value().active_connections)
+            .sum();
+        (
+            self.permanent_bans.len(),
+            self.whitelist.len(),
+            total_active,
+        )
+    }
+
+    pub fn list_whitelisted_ips(&self) -> Vec<IpAddr> {
+        self.whitelist.iter().map(|kv| *kv.key()).collect()
+    }
+
+    /// Returns a snapshot of all currently tracked IPs for the realtime monitor
+    pub fn list_tracked_ips(&self) -> Vec<TrackedIpSnapshot> {
+        let mut result: Vec<TrackedIpSnapshot> = self
+            .stats
+            .iter()
+            .filter(|entry| entry.value().active_connections > 0)
+            .map(|entry| {
+                let ip = *entry.key();
+                let s = entry.value();
+                let info = self.get_ip_info(ip);
+                let status_str = match &s.status {
+                    IpStatus::Normal => "NORMAL".to_string(),
+                    IpStatus::Whitelisted => "WHITELISTED".to_string(),
+                    IpStatus::Banned => "BANNED".to_string(),
+                    IpStatus::TempBlacklisted(_) => "TEMP_BLOCK".to_string(),
+                };
+                TrackedIpSnapshot {
+                    ip,
+                    active_connections: s.active_connections,
+                    connects_per_min: s.connects_in_minute,
+                    strikes: s.strikes,
+                    status: status_str,
+                    country: info.country,
+                    asn_org: info.asn_org,
+                }
+            })
+            .collect();
+        // Sort by active connections descending
+        result.sort_by(|a, b| b.active_connections.cmp(&a.active_connections));
+        result
+    }
+
     pub fn spawn_cleanup_task(&self) {
         let stats = self.stats.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(CLEANUP_INTERVAL_SECS)).await;
                 let now = Instant::now();
-                stats.retain(|_, s| {
-                    match s.status {
-                        IpStatus::TempBlacklisted(until) => now < until,
-                        IpStatus::Normal => s.active_connections > 0,
-                        _ => true,
-                    }
+                stats.retain(|_, s| match s.status {
+                    IpStatus::TempBlacklisted(until) => now < until,
+                    IpStatus::Normal => s.active_connections > 0,
+                    _ => true,
                 });
             }
         });
