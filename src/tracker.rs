@@ -2,11 +2,11 @@ use crate::config::AppConfig;
 use crate::kernel::KernelFirewall;
 use dashmap::{DashMap, DashSet};
 use std::fs;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
-use tracing::info;
+use tracing::{info, warn};
 
 const BANNED_FILE: &str = "banned_ips.txt";
 const WHITELIST_FILE: &str = "whitelist_ips.txt";
@@ -37,27 +37,60 @@ impl Default for IpStats {
     }
 }
 
+#[derive(Debug, PartialEq)]
 pub enum CheckResult {
     Allowed,
     Rejected(&'static str),
     BannedPermanently(&'static str),
 }
+
+pub struct IpInfo {
+    pub country: String,
+    pub asn_org: String,
+}
+
 pub struct ConnectionTracker {
     stats: Arc<DashMap<String, IpStats>>,
     permanent_bans: Arc<DashSet<String>>,
     whitelist: Arc<DashSet<String>>,
     kernel_fw: Arc<KernelFirewall>,
     config: Arc<AppConfig>,
+    subnet_strikes: Arc<DashMap<String, u32>>,
+    asn_reader: Option<maxminddb::Reader<Vec<u8>>>,
+    country_reader: Option<maxminddb::Reader<Vec<u8>>>,
 }
 
 impl ConnectionTracker {
     pub fn new(config: Arc<AppConfig>, kernel_fw: Arc<KernelFirewall>) -> Self {
+        let mut asn_reader = None;
+        let mut country_reader = None;
+
+        if config.geo.enabled {
+            match maxminddb::Reader::open_readfile(&config.geo.asn_db_path) {
+                Ok(r) => {
+                    info!("Loaded MaxMind ASN DB from {}", config.geo.asn_db_path);
+                    asn_reader = Some(r);
+                }
+                Err(e) => warn!("Failed to load MaxMind ASN DB {}: {e}", config.geo.asn_db_path),
+            }
+            match maxminddb::Reader::open_readfile(&config.geo.country_db_path) {
+                Ok(r) => {
+                    info!("Loaded MaxMind Country DB from {}", config.geo.country_db_path);
+                    country_reader = Some(r);
+                }
+                Err(e) => warn!("Failed to load MaxMind Country DB {}: {e}", config.geo.country_db_path),
+            }
+        }
+
         let tracker = Self {
             stats: Arc::new(DashMap::new()),
             permanent_bans: Arc::new(DashSet::new()),
             whitelist: Arc::new(DashSet::new()),
             kernel_fw,
             config,
+            subnet_strikes: Arc::new(DashMap::new()),
+            asn_reader,
+            country_reader,
         };
         tracker.load_banned_ips();
         tracker.load_whitelist_ips();
@@ -106,8 +139,7 @@ impl ConnectionTracker {
         self.whitelist.contains(ip)
     }
 
-    pub fn check_and_track(&self, ip: &str) -> CheckResult {
-        // check whitelist thi cho phep luon
+    pub fn check_and_track(&self, ip: &str, specific_allowed: Option<&Vec<String>>) -> CheckResult {
         if self.is_whitelisted(ip) {
             return CheckResult::Allowed;
         }
@@ -116,6 +148,43 @@ impl ConnectionTracker {
         let now = Instant::now();
         let cfg = &self.config;
 
+        // --- Geo/ASN Filtering ---
+        if cfg.geo.enabled {
+            if let Ok(addr) = ip.parse::<IpAddr>() {
+                // 1. Check Country
+                if let Some(ref reader) = self.country_reader {
+                    if let Ok(country) = reader.lookup::<maxminddb::geoip2::Country>(addr) {
+                        if let Some(c) = country.country {
+                            if let Some(iso) = c.iso_code {
+                                let iso_code = iso.to_string();
+                                
+                                // Nếu có cấu hình danh sách riêng thì mới check, không thì cho qua
+                                if let Some(allowed_list) = specific_allowed {
+                                    if !allowed_list.contains(&iso_code) {
+                                        return CheckResult::Rejected("GEO BLOCKED: COUNTRY NOT ALLOWED");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 2. Check ASN / Datacenter
+                if let Some(ref reader) = self.asn_reader {
+                    if let Ok(asn) = reader.lookup::<maxminddb::geoip2::Asn>(addr) {
+                        if let Some(org) = asn.autonomous_system_organization {
+                            let is_dc = org.contains("DigitalOcean") || org.contains("Amazon") || org.contains("Google") || org.contains("Hetzner") || org.contains("OVH") || org.contains("Microsoft");
+                            
+                            if is_dc && stats.connects_in_minute >= cfg.geo.datacenter_max_connects_per_minute {
+                                stats.strikes += 1;
+                                return CheckResult::Rejected("DATACENTER RATE LIMIT");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(until) = stats.blacklisted_until {
             if now < until {
                 return CheckResult::Rejected("TEMP BLACKLISTED");
@@ -123,8 +192,7 @@ impl ConnectionTracker {
             stats.blacklisted_until = None;
         }
 
-        if now.duration_since(stats.window_start) > Duration::from_secs(cfg.rate_limit.window_secs)
-        {
+        if now.duration_since(stats.window_start) > Duration::from_secs(cfg.rate_limit.window_secs) {
             stats.window_start = now;
             stats.connects_in_window = 0;
         }
@@ -140,12 +208,19 @@ impl ConnectionTracker {
             || stats.connects_in_minute > cfg.rate_limit.max_connects_per_minute
         {
             stats.strikes += 1;
-            if cfg.protection.strikes_before_ban > 0
-                && stats.strikes >= cfg.protection.strikes_before_ban
-            {
+            if cfg.protection.strikes_before_ban > 0 && stats.strikes >= cfg.protection.strikes_before_ban {
                 self.permanent_bans.insert(ip.to_string());
                 if let Ok(ipv4) = ip.parse::<Ipv4Addr>() {
                     let _ = self.kernel_fw.ban(ipv4);
+
+                    let octets = ipv4.octets();
+                    let subnet = format!("{}.{}.{}.0/24", octets[0], octets[1], octets[2]);
+                    let mut s_strikes = self.subnet_strikes.entry(subnet.clone()).or_insert(0);
+                    *s_strikes += 1;
+
+                    if *s_strikes >= cfg.protection.subnet_strike_threshold {
+                        let _ = self.kernel_fw.ban_subnet(&subnet);
+                    }
                 }
                 return CheckResult::BannedPermanently("STRIKE LIMIT → PERMANENT BAN");
             }
@@ -168,6 +243,7 @@ impl ConnectionTracker {
             stats.active_connections = stats.active_connections.saturating_sub(1);
         }
     }
+
     pub async fn mark_as_good(&self, ip: &str) {
         if self.is_whitelisted(ip) {
             return;
@@ -199,6 +275,25 @@ impl ConnectionTracker {
         };
         let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let _ = file.write_all(format!("[{ts}] {ip}\n").as_bytes()).await;
+    }
+
+    pub fn get_ip_info(&self, ip: &str) -> IpInfo {
+        let mut country_code = "??".to_string();
+        let mut org = "Unknown".to_string();
+
+        if let Ok(addr) = ip.parse::<std::net::IpAddr>() {
+            if let Some(ref r) = self.country_reader {
+                if let Ok(c) = r.lookup::<maxminddb::geoip2::Country>(addr) {
+                    country_code = c.country.and_then(|co| co.iso_code).unwrap_or("??").to_string();
+                }
+            }
+            if let Some(ref r) = self.asn_reader {
+                if let Ok(a) = r.lookup::<maxminddb::geoip2::Asn>(addr) {
+                    org = a.autonomous_system_organization.unwrap_or("Unknown").to_string();
+                }
+            }
+        }
+        IpInfo { country: country_code, asn_org: org }
     }
 
     pub fn spawn_cleanup_task(&self) {

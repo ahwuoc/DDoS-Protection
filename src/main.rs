@@ -16,19 +16,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_target(false)
         .init();
 
-    info!("[*] Starting NRO Multi-Port Anti-Spam Proxy...");
+    info!("[*] Starting NRO Multi-Port Anti-Spam Proxy (Hierarchical Mode)...");
+    
     // load config vao arc
     let config = Arc::new(AppConfig::load());
-    let listen_ports: Vec<u16> = config
-        .mappings
-        .iter()
-        .filter_map(|m| {
-            m.listen_addr
-                .rsplit(":")
-                .next()
-                .and_then(|p| p.parse().ok())
-        })
-        .collect();
+    
+    let mut listen_ports = Vec::new();
+    for server in &config.servers {
+        for mapping in &server.mappings {
+            if let Some(port) = mapping.listen_addr.rsplit(":").next().and_then(|p| p.parse::<u16>().ok()) {
+                listen_ports.push(port);
+            }
+        }
+    }
 
     // kernel
     info!(
@@ -56,55 +56,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut tasks = Vec::new();
 
-    for mapping in &config.mappings {
-        let mapping = mapping.clone();
-        let tracker = tracker.clone();
-        let config = config.clone();
-        let _kernel_fw = kernel_fw.clone();
+    for server in &config.servers {
+        for mapping in &server.mappings {
+            let mapping = mapping.clone();
+            let tracker = tracker.clone();
+            let config = config.clone();
+            let target_ip = server.target_ip.clone();
+            let server_allowed = server.allowed_countries.clone();
 
-        info!(
-            mapping = %mapping.name,
-            listen = %mapping.listen_addr,
-            target = %mapping.target_addr,
-            "Starting proxy task"
-        );
+            info!(
+                mapping = %mapping.name,
+                listen = %mapping.listen_addr,
+                target = %format!("{}:{}", target_ip, mapping.target_port),
+                "Starting proxy task"
+            );
 
-        let task = tokio::spawn(async move {
-            let listener = match tokio::net::TcpListener::bind(&mapping.listen_addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    error!(name = %mapping.name, error = %e, "Failed to bind listener");
-                    return;
-                }
-            };
-
-            loop {
-                match listener.accept().await {
-                    Ok((socket, addr)) => {
-                        let ip = addr.ip().to_string();
-                        if tracker.is_permanently_banned(&ip) {
-                            drop(socket);
-                            continue;
-                        }
-
-                        let target_addr = mapping.target_addr.clone();
-                        let tracker = tracker.clone();
-                        let config = config.clone();
-                        tokio::spawn(proxy::handle_connection(
-                            socket,
-                            ip,
-                            tracker,
-                            config,
-                            target_addr,
-                        ));
-                    }
+            let task = tokio::spawn(async move {
+                let listener = match tokio::net::TcpListener::bind(&mapping.listen_addr).await {
+                    Ok(l) => l,
                     Err(e) => {
-                        error!(name = %mapping.name, error = %e, "Accept error");
+                        error!(name = %mapping.name, error = %e, "Failed to bind listener");
+                        return;
+                    }
+                };
+
+                loop {
+                    match listener.accept().await {
+                        Ok((socket, addr)) => {
+                            let ip = addr.ip().to_string();
+                            if tracker.is_permanently_banned(&ip) {
+                                drop(socket);
+                                continue;
+                            }
+
+                            let mapping = mapping.clone();
+                            let tracker = tracker.clone();
+                            let config = config.clone();
+                            let target_ip = target_ip.clone();
+                            let server_allowed = server_allowed.clone();
+                            
+                            tokio::spawn(proxy::handle_connection(
+                                socket,
+                                ip,
+                                tracker,
+                                config,
+                                target_ip,
+                                mapping,
+                                server_allowed,
+                            ));
+                        }
+                        Err(e) => {
+                            error!(name = %mapping.name, error = %e, "Accept error");
+                        }
                     }
                 }
-            }
-        });
-        tasks.push(task);
+            });
+            tasks.push(task);
+        }
     }
 
     tokio::select! {

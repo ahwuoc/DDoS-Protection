@@ -1,0 +1,50 @@
+{
+  "servers": [
+    {
+      "target_ip": "1.2.3.4",
+      "allowed_countries": [
+        "VN",
+        "JP",
+        "US",
+        "KR",
+        "TW"
+      ],
+      "mappings": [
+        {
+          "name": "Game Port",
+          "listen_addr": "0.0.0.0:14443",
+          "target_port": 14443
+        },
+        {
+          "name": "Database Port",
+          "listen_addr": "0.0.0.0:3306",
+          "target_port": 3306,
+          "allowed_countries": [
+            "VN"
+          ]
+        }
+      ]
+    }
+  ],
+  "connection": {
+    "max_connections_per_ip": 10
+  },
+  "rate_limit": {
+    "window_secs": 2,
+    "max_connects_per_window": 10,
+    "max_connects_per_minute": 100
+  },
+  "protection": {
+    "blacklist_duration_secs": 60,
+    "whitelist_after_secs": 30,
+    "strikes_before_ban": 3,
+    "max_syn_per_sec": 50000,
+    "subnet_strike_threshold": 3
+  },
+  "geo": {
+    "enabled": true,
+    "asn_db_path": "geoip/GeoLite2-ASN.mmdb",
+    "country_db_path": "geoip/GeoLite2-Country.mmdb",
+    "datacenter_max_connects_per_minute": 5
+  }
+}

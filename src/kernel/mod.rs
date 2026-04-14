@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 
 use nftables::batch::Batch;
@@ -90,6 +91,17 @@ impl KernelFirewall {
     pub fn setup(&self, listen_ports: Vec<u16>) -> Result<(), Box<dyn std::error::Error>> {
         let mut batch = Batch::new();
 
+        // Delete table if exists to start fresh
+        let _ = Self::apply({
+            let mut b = Batch::new();
+            b.delete(NfListObject::Table(Table {
+                family: NfFamily::INet,
+                name: Cow::Borrowed(TABLE),
+                ..Default::default()
+            }));
+            b
+        });
+
         batch.add(NfListObject::Table(Table {
             family: NfFamily::INet,
             name: Cow::Borrowed(TABLE),
@@ -112,6 +124,11 @@ impl KernelFirewall {
             table: Cow::Borrowed(TABLE),
             name: Cow::Borrowed(SET_BAN),
             set_type: SetTypeValue::Single(SetType::Ipv4Addr),
+            flags: Some({
+                let mut s = HashSet::new();
+                s.insert(SetFlag::Interval);
+                s
+            }),
             ..Default::default()
         })));
 
@@ -221,7 +238,20 @@ impl KernelFirewall {
             elem: Cow::Owned(vec![Self::str_expr(&ip.to_string())]),
         }));
         Self::apply(batch)?;
-        tracing::info!("[-] Kernel ban: {ip}");
+        tracing::info!("[-] Kernel ban IP: {ip}");
+        Ok(())
+    }
+
+    pub fn ban_subnet(&self, subnet: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let mut batch = Batch::new();
+        batch.add(NfListObject::Element(Element {
+            family: NfFamily::INet,
+            table: Cow::Borrowed(TABLE),
+            name: Cow::Borrowed(SET_BAN),
+            elem: Cow::Owned(vec![Self::str_expr(subnet)]),
+        }));
+        Self::apply(batch)?;
+        tracing::info!("[-] Kernel ban SUBNET: {subnet}");
         Ok(())
     }
 

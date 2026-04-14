@@ -4,3 +4,8 @@ banned_ips.txt
 *.log
 /scratch
 vps.txt
+/geoip/
+*.mmdb
+GeoLite2*
+whitelist_ips.txt
+licensekey.txt

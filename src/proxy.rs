@@ -1,9 +1,9 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, Mapping};
 use crate::tracker::{CheckResult, ConnectionTracker};
 use std::sync::Arc;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
-use tokio::time::{Duration, timeout};
+use tokio::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
 
 #[instrument(skip_all, fields(%ip))]
@@ -12,11 +12,19 @@ pub async fn handle_connection(
     ip: String,
     tracker: Arc<ConnectionTracker>,
     _config: Arc<AppConfig>,
-    target_addr: String,
+    target_ip: String,
+    mapping: Mapping,
+    server_allowed: Option<Vec<String>>,
 ) {
     let _ = client.set_nodelay(true);
 
-    match tracker.check_and_track(&ip) {
+    // Ưu tiên mapping allowed, sau đó đến server allowed
+    let effective_allowed = mapping
+        .allowed_countries
+        .as_ref()
+        .or(server_allowed.as_ref());
+
+    match tracker.check_and_track(&ip, effective_allowed) {
         CheckResult::BannedPermanently(reason) => {
             ConnectionTracker::persist_ban(&ip).await;
             info!(reason, "[-] Dropped (banned)");
@@ -29,11 +37,13 @@ pub async fn handle_connection(
         CheckResult::Allowed => {}
     }
 
+    let target_addr = format!("{}:{}", target_ip, mapping.target_port);
     // connection den backend roi forward data
     match TcpStream::connect(&target_addr).await {
         Ok(mut backend) => {
             let _ = backend.set_nodelay(true);
-            info!("Accepted connection from {ip} -> Connected to {target_addr}");
+            let info = tracker.get_ip_info(&ip);
+            info!("Accepted connection from {ip} [{} | {}] -> Connected to {target_addr}", info.country, info.asn_org);
 
             let tracker_clone = tracker.clone();
             let ip_clone = ip.clone();
