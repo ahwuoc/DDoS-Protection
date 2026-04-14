@@ -33,6 +33,8 @@ struct App {
     view: View,
     status_msg: String,
     table_state: TableState,
+    /// Cached list length from last draw — avoids re-calling list_tracked_ips()/list_banned_ips()
+    last_list_len: usize,
 }
 
 impl App {
@@ -41,6 +43,7 @@ impl App {
             view: View::Dashboard,
             status_msg: "Ready".to_string(),
             table_state: TableState::default(),
+            last_list_len: 0,
         }
     }
 
@@ -48,6 +51,7 @@ impl App {
         self.view = View::Dashboard;
         self.status_msg = "Ready".to_string();
         self.table_state = TableState::default();
+        self.last_list_len = 0;
     }
 
     fn next_row(&mut self, len: usize) {
@@ -126,12 +130,8 @@ pub fn run_menu(tracker: Arc<ConnectionTracker>) -> Result<()> {
         let is_scrollable = matches!(app.view, View::Monitor | View::BannedList | View::Whitelist);
 
         if is_scrollable {
-            let list_len = match app.view {
-                View::Monitor => tracker.list_tracked_ips().len(),
-                View::BannedList => tracker.list_banned_ips().len(),
-                View::Whitelist => tracker.list_whitelisted_ips().len(),
-                _ => 0,
-            };
+            // Use cached length from draw — no second call needed
+            let list_len = app.last_list_len;
 
             if event::poll(Duration::from_millis(if app.view == View::Monitor {
                 1000
@@ -290,6 +290,7 @@ fn hotkey_line(key: &str, desc: &str) -> Line<'static> {
 
 fn draw_monitor(f: &mut Frame, tracker: &ConnectionTracker, app: &mut App) {
     let tracked = tracker.list_tracked_ips();
+    app.last_list_len = tracked.len();
     let (banned, white, active) = tracker.get_stats();
 
     let chunks = Layout::default()
@@ -424,6 +425,7 @@ fn draw_ip_table(f: &mut Frame, tracker: &ConnectionTracker, app: &mut App, is_b
             Color::Green,
         )
     };
+    app.last_list_len = ips.len();
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)

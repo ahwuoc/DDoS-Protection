@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
     let kernel_fw = Arc::new(init_firewall(&listen_ports, &config));
     let tracker = Arc::new(ConnectionTracker::new(config.clone(), kernel_fw.clone()));
     tracker.spawn_cleanup_task();
+    tracker.spawn_ban_flush_task();
 
     spawn_config_watcher(tracker.clone());
     spawn_proxy_listeners(&config, tracker.clone());
@@ -167,12 +168,15 @@ fn spawn_config_watcher(tracker: Arc<ConnectionTracker>) {
 
 fn spawn_proxy_listeners(config: &AppConfig, tracker: Arc<ConnectionTracker>) {
     for server in &config.servers {
+        let target_ip: Arc<str> = server.target_ip.clone().into();
+        let allowed: Option<Arc<Vec<String>>> = server.allowed_countries.clone().map(Arc::new);
+
         for mapping in &server.mappings {
             let mapping = mapping.clone();
             let tracker = tracker.clone();
             let config_arc = Arc::new((**&config).clone());
-            let target_ip = server.target_ip.clone();
-            let allowed = server.allowed_countries.clone();
+            let target_ip = target_ip.clone();
+            let allowed = allowed.clone();
 
             info!(
                 mapping = %mapping.name,
@@ -192,8 +196,8 @@ async fn run_listener(
     mapping: proxy_forward::config::Mapping,
     tracker: Arc<ConnectionTracker>,
     config: Arc<AppConfig>,
-    target_ip: String,
-    allowed: Option<Vec<String>>,
+    target_ip: Arc<str>,
+    allowed: Option<Arc<Vec<String>>>,
 ) {
     let listener = match tokio::net::TcpListener::bind(&mapping.listen_addr).await {
         Ok(l) => l,
@@ -220,7 +224,8 @@ async fn run_listener(
 
                 tokio::spawn(async move {
                     if let Err(e) = proxy::handle_connection(
-                        socket, ip, tracker, config, target_ip, mapping, allowed,
+                        socket, ip, tracker, config, target_ip.to_string(), mapping,
+                        allowed.as_deref().cloned(),
                     )
                     .await
                     {

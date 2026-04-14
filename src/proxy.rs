@@ -21,7 +21,7 @@ pub async fn handle_connection(
 ) -> Result<()> {
     let _ = client.set_nodelay(true);
 
-    match tracker.check_and_track(ip, server_allowed.as_ref()) {
+    let ip_info = match tracker.check_and_track(ip, server_allowed.as_ref()) {
         CheckResult::BannedPermanently(reason) => {
             ConnectionTracker::persist_ban(&ip.to_string()).await;
             info!(reason, "[-] Dropped (banned)");
@@ -31,17 +31,16 @@ pub async fn handle_connection(
             debug!(reason, "[-] Dropped");
             return Ok(());
         }
-        CheckResult::Allowed => {}
-    }
+        CheckResult::Allowed(info) => info,
+    };
 
     let target_addr = format!("{}:{}", target_ip, mapping.target_port);
     match TcpStream::connect(&target_addr).await {
         Ok(mut backend) => {
             let _ = backend.set_nodelay(true);
-            let info = tracker.get_ip_info(ip);
             info!(
                 "Accepted connection from {ip} [{} | {}] -> Connected to {target_addr}",
-                info.country, info.asn_org
+                ip_info.country, ip_info.asn_org
             );
 
             let tracker_clone = tracker.clone();
