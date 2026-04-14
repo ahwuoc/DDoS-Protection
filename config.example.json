@@ -18,10 +18,7 @@
         {
           "name": "Database Port",
           "listen_addr": "0.0.0.0:3306",
-          "target_port": 3306,
-          "allowed_countries": [
-            "VN"
-          ]
+          "target_port": 3306
         }
       ]
     }

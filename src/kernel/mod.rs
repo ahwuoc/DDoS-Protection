@@ -1,3 +1,4 @@
+use anyhow::{Result, anyhow};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -24,9 +25,9 @@ impl KernelFirewall {
         fw
     }
 
-    fn apply(batch: Batch) -> Result<(), Box<dyn std::error::Error>> {
+    fn apply(batch: Batch) -> Result<()> {
         let nft = batch.to_nftables();
-        helper::apply_ruleset(&nft)?;
+        helper::apply_ruleset(&nft).map_err(|e| anyhow!("{e}"))?;
         Ok(())
     }
 
@@ -88,7 +89,7 @@ impl KernelFirewall {
     }
 
     // ── Setup: table + chain + whitelist + drop policy ──────
-    pub fn setup(&self, listen_ports: Vec<u16>) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn setup(&self, listen_ports: Vec<u16>) -> Result<()> {
         let mut batch = Batch::new();
 
         // Delete table if exists to start fresh
@@ -229,7 +230,7 @@ impl KernelFirewall {
     }
 
     // ── Ban IP ──────────────────────────────────────────────
-    pub fn ban(&self, ip: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn ban(&self, ip: Ipv4Addr) -> Result<()> {
         let mut batch = Batch::new();
         batch.add(NfListObject::Element(Element {
             family: NfFamily::INet,
@@ -242,7 +243,7 @@ impl KernelFirewall {
         Ok(())
     }
 
-    pub fn ban_subnet(&self, subnet: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn ban_subnet(&self, subnet: &str) -> Result<()> {
         let mut batch = Batch::new();
         batch.add(NfListObject::Element(Element {
             family: NfFamily::INet,
@@ -255,8 +256,28 @@ impl KernelFirewall {
         Ok(())
     }
 
+    pub fn ban_bulk(&self, ips: Vec<Ipv4Addr>) -> Result<()> {
+        if ips.is_empty() {
+            return Ok(());
+        }
+        let mut batch = Batch::new();
+        let elements = ips
+            .iter()
+            .map(|ip| Self::str_expr(&ip.to_string()))
+            .collect();
+        batch.add(NfListObject::Element(Element {
+            family: NfFamily::INet,
+            table: Cow::Borrowed(TABLE),
+            name: Cow::Borrowed(SET_BAN),
+            elem: Cow::Owned(elements),
+        }));
+        Self::apply(batch)?;
+        tracing::info!("[-] Kernel bulk ban: {} IPs", ips.len());
+        Ok(())
+    }
+
     // ── Unban IP ────────────────────────────────────────────
-    pub fn unban(&self, ip: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn unban(&self, ip: Ipv4Addr) -> Result<()> {
         let mut batch = Batch::new();
         batch.delete(NfListObject::Element(Element {
             family: NfFamily::INet,
@@ -270,7 +291,7 @@ impl KernelFirewall {
     }
 
     // ── Whitelist IP ──────────────────────────────────────────
-    pub fn whitelist(&self, ip: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn whitelist(&self, ip: Ipv4Addr) -> Result<()> {
         let mut batch = Batch::new();
         batch.add(NfListObject::Element(Element {
             family: NfFamily::INet,
@@ -283,8 +304,28 @@ impl KernelFirewall {
         Ok(())
     }
 
+    pub fn whitelist_bulk(&self, ips: Vec<Ipv4Addr>) -> Result<()> {
+        if ips.is_empty() {
+            return Ok(());
+        }
+        let mut batch = Batch::new();
+        let elements = ips
+            .iter()
+            .map(|ip| Self::str_expr(&ip.to_string()))
+            .collect();
+        batch.add(NfListObject::Element(Element {
+            family: NfFamily::INet,
+            table: Cow::Borrowed(TABLE),
+            name: Cow::Borrowed(SET_WHITE),
+            elem: Cow::Owned(elements),
+        }));
+        Self::apply(batch)?;
+        tracing::info!("[*] Kernel bulk whitelist: {} IPs", ips.len());
+        Ok(())
+    }
+
     // ── Remove from Whitelist ─────────────────────────────────
-    pub fn unwhitelist(&self, ip: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn unwhitelist(&self, ip: Ipv4Addr) -> Result<()> {
         let mut batch = Batch::new();
         batch.delete(NfListObject::Element(Element {
             family: NfFamily::INet,
@@ -298,7 +339,7 @@ impl KernelFirewall {
     }
 
     // ── Drop invalid conntrack state ────────────────────────
-    pub fn add_invalid_drop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn add_invalid_drop(&self) -> Result<()> {
         let mut batch = Batch::new();
         batch.add(NfListObject::Rule(Self::rule_with(vec![
             Self::match_stmt(
@@ -318,7 +359,7 @@ impl KernelFirewall {
         &self,
         listen_ports: Vec<u16>,
         max_syn_per_sec: u32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<()> {
         let mut batch = Batch::new();
 
         // Rule 1: Drop SYN if ct state is invalid
@@ -361,7 +402,7 @@ impl KernelFirewall {
     }
 
     // ── Teardown: delete entire table ───────────────────────
-    pub fn teardown(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn teardown(&self) -> Result<()> {
         let mut batch = Batch::new();
         batch.delete(NfListObject::Table(Table {
             family: NfFamily::INet,

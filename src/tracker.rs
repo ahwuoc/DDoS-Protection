@@ -1,8 +1,9 @@
 use crate::config::AppConfig;
 use crate::kernel::KernelFirewall;
+use arc_swap::ArcSwap;
 use dashmap::{DashMap, DashSet};
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -12,6 +13,14 @@ const BANNED_FILE: &str = "banned_ips.txt";
 const WHITELIST_FILE: &str = "whitelist_ips.txt";
 const CLEANUP_INTERVAL_SECS: u64 = 900;
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum IpStatus {
+    Normal,
+    Whitelisted,
+    Banned,
+    TempBlacklisted(Instant),
+}
+
 #[derive(Clone, Debug)]
 struct IpStats {
     active_connections: usize,
@@ -19,7 +28,7 @@ struct IpStats {
     window_start: Instant,
     minute_start: Instant,
     connects_in_minute: u32,
-    blacklisted_until: Option<Instant>,
+    status: IpStatus,
     strikes: u32,
 }
 
@@ -31,7 +40,7 @@ impl Default for IpStats {
             window_start: Instant::now(),
             minute_start: Instant::now(),
             connects_in_minute: 0,
-            blacklisted_until: None,
+            status: IpStatus::Normal,
             strikes: 0,
         }
     }
@@ -50,11 +59,11 @@ pub struct IpInfo {
 }
 
 pub struct ConnectionTracker {
-    stats: Arc<DashMap<String, IpStats>>,
-    permanent_bans: Arc<DashSet<String>>,
-    whitelist: Arc<DashSet<String>>,
+    stats: Arc<DashMap<IpAddr, IpStats>>,
+    permanent_bans: Arc<DashSet<IpAddr>>,
+    whitelist: Arc<DashSet<IpAddr>>,
     kernel_fw: Arc<KernelFirewall>,
-    config: Arc<AppConfig>,
+    config: ArcSwap<AppConfig>,
     subnet_strikes: Arc<DashMap<String, u32>>,
     asn_reader: Option<maxminddb::Reader<Vec<u8>>>,
     country_reader: Option<maxminddb::Reader<Vec<u8>>>,
@@ -96,7 +105,7 @@ impl ConnectionTracker {
             permanent_bans: Arc::new(DashSet::new()),
             whitelist: Arc::new(DashSet::new()),
             kernel_fw,
-            config,
+            config: ArcSwap::from(config),
             subnet_strikes: Arc::new(DashMap::new()),
             asn_reader,
             country_reader,
@@ -106,30 +115,43 @@ impl ConnectionTracker {
         tracker
     }
 
+    pub fn reload_config(&self, new_config: Arc<AppConfig>) {
+        self.config.store(new_config);
+        info!("ConnectionTracker configuration reloaded");
+    }
+
     fn load_banned_ips(&self) {
         if let Ok(data) = fs::read_to_string(BANNED_FILE) {
+            let mut ips_to_ban = Vec::new();
             for line in data.lines() {
-                let ip = line.split("] ").nth(1).unwrap_or(line).trim();
-                if !ip.is_empty() {
-                    self.permanent_bans.insert(ip.to_string());
-                    if let Ok(ipv4) = ip.parse::<Ipv4Addr>() {
-                        let _ = self.kernel_fw.ban(ipv4);
+                let ip_str = line.split("] ").nth(1).unwrap_or(line).trim();
+                if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                    self.permanent_bans.insert(ip);
+                    if let IpAddr::V4(ipv4) = ip {
+                        ips_to_ban.push(ipv4);
                     }
                 }
+            }
+            if !ips_to_ban.is_empty() {
+                let _ = self.kernel_fw.ban_bulk(ips_to_ban);
             }
         }
     }
 
     fn load_whitelist_ips(&self) {
         if let Ok(data) = fs::read_to_string(WHITELIST_FILE) {
+            let mut ips_to_white = Vec::new();
             for line in data.lines() {
-                let ip = line.trim();
-                if !ip.is_empty() {
-                    self.whitelist.insert(ip.to_string());
-                    if let Ok(ipv4) = ip.parse::<Ipv4Addr>() {
-                        let _ = self.kernel_fw.whitelist(ipv4);
+                let ip_str = line.trim();
+                if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                    self.whitelist.insert(ip);
+                    if let IpAddr::V4(ipv4) = ip {
+                        ips_to_white.push(ipv4);
                     }
                 }
+            }
+            if !ips_to_white.is_empty() {
+                let _ = self.kernel_fw.whitelist_bulk(ips_to_white);
             }
         }
         if !self.whitelist.is_empty() {
@@ -141,11 +163,11 @@ impl ConnectionTracker {
     }
 
     pub fn is_permanently_banned(&self, ip: IpAddr) -> bool {
-        self.permanent_bans.contains(&ip.to_string())
+        self.permanent_bans.contains(&ip)
     }
 
     pub fn is_whitelisted(&self, ip: IpAddr) -> bool {
-        self.whitelist.contains(&ip.to_string())
+        self.whitelist.contains(&ip)
     }
 
     pub fn check_and_track(
@@ -157,10 +179,9 @@ impl ConnectionTracker {
             return CheckResult::Allowed;
         }
 
-        let ip_str = ip.to_string();
-        let mut stats = self.stats.entry(ip_str.clone()).or_default();
+        let mut stats = self.stats.entry(ip).or_default();
         let now = Instant::now();
-        let cfg = &self.config;
+        let cfg = self.config.load();
 
         // --- Geo/ASN Filtering ---
         if cfg.geo.enabled {
@@ -171,7 +192,7 @@ impl ConnectionTracker {
                         if let Some(iso) = c.iso_code {
                             let iso_code = iso.to_string();
 
-                            // Nếu có cấu hình danh sách riêng thì mới check, không thì cho qua
+                            // Kiểm tra danh sách được phép
                             if let Some(allowed_list) = specific_allowed {
                                 if !allowed_list.contains(&iso_code) {
                                     return CheckResult::Rejected(
@@ -214,11 +235,16 @@ impl ConnectionTracker {
             }
         }
 
-        if let Some(until) = stats.blacklisted_until {
-            if now < until {
-                return CheckResult::Rejected("TEMP BLACKLISTED");
+        match stats.status {
+            IpStatus::Banned => return CheckResult::BannedPermanently("BANNED"),
+            IpStatus::TempBlacklisted(until) => {
+                if now < until {
+                    return CheckResult::Rejected("TEMP BLACKLISTED");
+                }
+                stats.status = IpStatus::Normal;
             }
-            stats.blacklisted_until = None;
+            IpStatus::Whitelisted => return CheckResult::Allowed,
+            IpStatus::Normal => {}
         }
 
         if now.duration_since(stats.window_start) > Duration::from_secs(cfg.rate_limit.window_secs)
@@ -241,7 +267,8 @@ impl ConnectionTracker {
             if cfg.protection.strikes_before_ban > 0
                 && stats.strikes >= cfg.protection.strikes_before_ban
             {
-                self.permanent_bans.insert(ip_str.clone());
+                stats.status = IpStatus::Banned;
+                self.permanent_bans.insert(ip);
                 if let IpAddr::V4(ipv4) = ip {
                     let _ = self.kernel_fw.ban(ipv4);
 
@@ -258,7 +285,7 @@ impl ConnectionTracker {
             }
 
             let duration = cfg.protection.blacklist_duration_secs * stats.strikes as u64;
-            stats.blacklisted_until = Some(now + Duration::from_secs(duration));
+            stats.status = IpStatus::TempBlacklisted(now + Duration::from_secs(duration));
             return CheckResult::Rejected("RATE LIMIT → TEMP BLACKLIST");
         }
 
@@ -271,21 +298,24 @@ impl ConnectionTracker {
     }
 
     pub fn release_connection(&self, ip: IpAddr) {
-        if let Some(mut stats) = self.stats.get_mut(&ip.to_string()) {
+        if let Some(mut stats) = self.stats.get_mut(&ip) {
             stats.active_connections = stats.active_connections.saturating_sub(1);
         }
     }
 
     pub async fn mark_as_good(&self, ip: IpAddr) {
-        let ip_str = ip.to_string();
         if self.is_whitelisted(ip) {
             return;
         }
 
-        info!(ip = %ip_str, "[*] IP verified as GOOD player -> Adding to Whitelist");
-        self.whitelist.insert(ip_str.clone());
+        info!(ip = %ip, "[*] IP verified as GOOD player -> Adding to Whitelist");
+        self.whitelist.insert(ip);
 
-        if let Ok(ipv4) = ip_str.parse::<Ipv4Addr>() {
+        if let Some(mut stats) = self.stats.get_mut(&ip) {
+            stats.status = IpStatus::Whitelisted;
+        }
+
+        if let IpAddr::V4(ipv4) = ip {
             let _ = self.kernel_fw.whitelist(ipv4);
         }
         let mut file = tokio::fs::OpenOptions::new()
@@ -294,7 +324,7 @@ impl ConnectionTracker {
             .open(WHITELIST_FILE)
             .await
             .unwrap();
-        let _ = file.write_all(format!("{}\n", ip_str).as_bytes()).await;
+        let _ = file.write_all(format!("{}\n", ip).as_bytes()).await;
     }
 
     pub async fn persist_ban(ip: &str) {
@@ -344,7 +374,11 @@ impl ConnectionTracker {
                 tokio::time::sleep(Duration::from_secs(CLEANUP_INTERVAL_SECS)).await;
                 let now = Instant::now();
                 stats.retain(|_, s| {
-                    s.blacklisted_until.is_some_and(|until| now < until) || s.active_connections > 0
+                    match s.status {
+                        IpStatus::TempBlacklisted(until) => now < until,
+                        IpStatus::Normal => s.active_connections > 0,
+                        _ => true,
+                    }
                 });
             }
         });

@@ -7,7 +7,7 @@ Một TCP proxy hiệu suất cao, bảo mật đa tầng được viết bằng
 ### 1. Kiến trúc phân cấp (Hierarchical Mapping)
 Thay vì danh sách phẳng, hệ thống quản lý theo cụm: **Servers -> Mappings**.
 - Mỗi cụm Server đại diện cho một máy chủ vật lý cụ thể.
-- Cho phép cấu hình danh sách quốc gia (`allowed_countries`) chung cho cả cụm hoặc riêng lẻ từng cổng.
+- Cho phép cấu hình danh sách quốc gia (`allowed_countries`) chung cho cả cụm server.
 
 ### 2. Bảo vệ 3 lớp (Triple-Layer Defense)
 1.  **Lớp 1 - Kernel (nftables):** Chặn IP đen ngay từ cổng vào của hệ điều hành. Tiêu tốn 0% tài nguyên xử lý ở mức ứng dụng.
@@ -21,25 +21,15 @@ Thay vì danh sách phẳng, hệ thống quản lý theo cụm: **Servers -> Ma
 ## Kiến trúc luồng xử lý (Workflow)
 
 ```mermaid
-flowchart TD
-    Client(("Internet Client")) -->|Gói tin TCP| Kernel["Tầng Kernel (nftables)"]
+graph TD
+    Client((Người dùng)) --> Layer1[Lớp 1: Kernel nftables]
+    Layer1 --> Layer23[Lớp 2-3: Rust Proxy App]
+    Layer23 --> GameServer[(Game Server)]
     
-    Kernel -->|Nằm trong Blacklist?| DropKernel["DROP (No Latency)"]
-    Kernel -->|Nằm trong Whitelist?| FastTrack["Bypass qua thẳng Game"]
-    
-    Kernel -->|Hợp lệ sơ bộ| Proxy["Rust Proxy App"]
-    
-    Proxy -->|Lọc Quốc gia (Geo)?| ProxyGeo{"Sai quốc gia?"}
-    ProxyGeo -->|Đúng| ProxyASN{"IP từ VPS/Cloud?"}
-    ProxyGeo -->|Sai| DropApp["Đóng kết nối"]
-    
-    ProxyASN -->|Có (Datacenter)| DCLimit{"Vượt ngưỡng DC Limit?"}
-    ProxyASN -->|Không (Dân dụng)| NormalLimit{"Vượt ngưỡng Rate Limit?"}
-    
-    DCLimit & NormalLimit -->|Vượt| Strike["Cấp thẻ phạt (Strike)"]
-    Strike -->|Đủ số thẻ| PermanentBan["Permanent Ban -> Đẩy xuống Kernel"]
-    
-    DCLimit & NormalLimit -->|Hợp lệ| Game[("Game Server Đích")]
+    subgraph "Hệ thống bảo vệ"
+    Layer1
+    Layer23
+    end
 ```
 
 ---
@@ -62,8 +52,7 @@ flowchart TD
         {
           "name": "Database",
           "listen_addr": "0.0.0.0:3306",
-          "target_port": 3306,
-          "allowed_countries": ["VN"]
+          "target_port": 3306
         }
       ]
     }

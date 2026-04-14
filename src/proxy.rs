@@ -19,12 +19,11 @@ pub async fn handle_connection(
     mapping: Mapping,
     server_allowed: Option<Vec<String>>,
 ) -> Result<()> {
-    let ip_str = ip.to_string();
     let _ = client.set_nodelay(true);
 
     match tracker.check_and_track(ip, server_allowed.as_ref()) {
         CheckResult::BannedPermanently(reason) => {
-            ConnectionTracker::persist_ban(&ip_str).await;
+            ConnectionTracker::persist_ban(&ip.to_string()).await;
             info!(reason, "[-] Dropped (banned)");
             return Ok(());
         }
