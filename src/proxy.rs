@@ -21,7 +21,7 @@ pub async fn handle_connection(
 ) -> Result<()> {
     let _ = client.set_nodelay(true);
 
-    let ip_info = match tracker.check_and_track(ip, server_allowed.as_ref()) {
+    let ip_info = match tracker.check_and_track(ip, mapping.target_port, server_allowed.as_ref()) {
         CheckResult::BannedPermanently(reason) => {
             let ban_info = tracker.get_ip_info(ip);
             tracker.persist_ban(

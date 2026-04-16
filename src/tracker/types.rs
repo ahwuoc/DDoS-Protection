@@ -23,6 +23,7 @@ pub struct IpStats {
     pub total_bytes_recv: u64,
     pub country: String,
     pub asn_org: String,
+    pub last_port: u16,
 }
 
 impl Default for IpStats {
@@ -40,6 +41,7 @@ impl Default for IpStats {
             total_bytes_recv: 0,
             country: String::new(),
             asn_org: String::new(),
+            last_port: 0,
         }
     }
 }
@@ -68,4 +70,5 @@ pub struct TrackedIpSnapshot {
     pub status: String,
     pub country: String,
     pub asn_org: String,
+    pub last_port: u16,
 }

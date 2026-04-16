@@ -11,16 +11,17 @@ use ratatui::{
 use std::net::IpAddr;
 
 const MONITOR_REFRESH_RATE: &str = "1s";
-const COL_INDEX: u16 = 4;
-const COL_IP: u16 = 18;
-const COL_CONNS: u16 = 6;
+const COL_INDEX: u16 = 3;
+const COL_IP: u16 = 15;
+const COL_PORT: u16 = 6;
+const COL_CONNS: u16 = 5;
 const COL_RATE: u16 = 8;
-const COL_STRIKES: u16 = 8;
-const COL_SCORE: u16 = 8;
-const COL_TRAFFIC: u16 = 16;
-const COL_STATUS: u16 = 12;
-const COL_COUNTRY: u16 = 8;
-const COL_ASN: u16 = 20;
+const COL_STRIKES: u16 = 5;
+const COL_SCORE: u16 = 5;
+const COL_TRAFFIC: u16 = 14;
+const COL_STATUS: u16 = 11;
+const COL_COUNTRY: u16 = 5;
+const COL_ASN: u16 = 15;
 
 pub fn draw_monitor(f: &mut Frame, tracker: &ConnectionTracker, app: &mut App) {
     let tracked = tracker.list_tracked_ips();
@@ -74,13 +75,14 @@ pub fn draw_monitor(f: &mut Frame, tracker: &ConnectionTracker, app: &mut App) {
     let header_cells = [
         "#",
         "IP Address",
+        "Port",
         "Conns",
-        "Req/min",
-        "Strikes",
-        "Score",
+        "Req/m",
+        "Strk",
+        "Scor",
         "Traffic (↑/↓)",
         "Status",
-        "Country",
+        "Ctry",
         "ASN",
     ]
     .iter()
@@ -99,6 +101,7 @@ pub fn draw_monitor(f: &mut Frame, tracker: &ConnectionTracker, app: &mut App) {
             Row::new(vec![
                 Cell::from(format!("{}", i + 1)),
                 Cell::from(t.ip.to_string()).style(value_style()),
+                Cell::from(if t.last_port > 0 { t.last_port.to_string() } else { "---".to_string() }).style(label_style(Color::Rgb(200, 200, 200))),
                 Cell::from(t.active_connections.to_string()).style(label_style(Color::Yellow)),
                 Cell::from(t.connects_per_min.to_string()).style(label_style(Color::Cyan)),
                 Cell::from(t.strikes.to_string()).style(label_style(if t.strikes > 0 {
@@ -133,6 +136,7 @@ pub fn draw_monitor(f: &mut Frame, tracker: &ConnectionTracker, app: &mut App) {
         [
             Constraint::Length(COL_INDEX),
             Constraint::Length(COL_IP),
+            Constraint::Length(COL_PORT),
             Constraint::Length(COL_CONNS),
             Constraint::Length(COL_RATE),
             Constraint::Length(COL_STRIKES),

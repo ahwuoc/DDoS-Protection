@@ -219,9 +219,11 @@ impl ConnectionTracker {
     pub fn check_and_track(
         &self,
         ip: IpAddr,
+        port: u16,
         specific_allowed: Option<&Vec<String>>,
     ) -> CheckResult {
         let mut stats = self.stats.entry(ip).or_default();
+        stats.last_port = port;
         let now = Instant::now();
         let cfg = self.config.load();
 
@@ -395,7 +397,7 @@ impl ConnectionTracker {
         let cfg = self.config.load();
         stats.total_bytes_sent += bytes_sent;
         stats.total_bytes_recv += bytes_recv;
-        if !cfg.behavioral.enabled || ip.is_loopback() || self.is_whitelisted(ip) {
+        if !cfg.behavioral.enabled || ip.is_loopback() || self.is_whitelisted(ip) || stats.status == IpStatus::Banned {
             return;
         }
         let mut penalty = 0.0;
@@ -603,6 +605,7 @@ impl ConnectionTracker {
                     } else {
                         s.asn_org.clone()
                     },
+                    last_port: s.last_port,
                 }
             })
             .collect();
