@@ -1,14 +1,22 @@
 /target
 /config.json
-banned_ips.txt
 *.log
 /scratch
 vps.txt
 /geoip/
 *.mmdb
 GeoLite2*
-whitelist_ips.txt
 licensekey.txt
+
+# Database
+firewall.db
+firewall.db-shm
+firewall.db-wal
+
+# Legacy files
+whitelist_ips.txt
+banned_ips.txt
+*.bak
 
 # Build artifacts
 ready_to_deploy/

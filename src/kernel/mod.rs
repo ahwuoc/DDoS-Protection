@@ -92,7 +92,7 @@ impl KernelFirewall {
     pub fn setup(&self, listen_ports: Vec<u16>) -> Result<()> {
         let mut batch = Batch::new();
 
-        // Delete table if exists to start fresh
+        // Delete table neu ton tai:V
         let _ = Self::apply({
             let mut b = Batch::new();
             b.delete(NfListObject::Table(Table {
@@ -141,39 +141,7 @@ impl KernelFirewall {
             ..Default::default()
         })));
 
-        batch.add(NfListObject::Rule(Self::rule_with(vec![
-            Self::match_stmt(
-                Self::payload("ip", "saddr"),
-                stmt::Operator::IN,
-                Self::str_expr(&format!("@{SET_WHITE}")),
-            ),
-            Self::accept_stmt(),
-        ])));
-
-        batch.add(NfListObject::Rule(Self::rule_with(vec![
-            Self::match_stmt(
-                Expression::Named(NamedExpression::Meta(Meta {
-                    key: MetaKey::Iifname,
-                    ..Default::default()
-                })),
-                stmt::Operator::EQ,
-                Self::str_expr("lo"),
-            ),
-            Self::accept_stmt(),
-        ])));
-
-        batch.add(NfListObject::Rule(Self::rule_with(vec![
-            Self::match_stmt(
-                Expression::Named(NamedExpression::Meta(Meta {
-                    key: MetaKey::L4proto,
-                    ..Default::default()
-                })),
-                stmt::Operator::EQ,
-                Self::str_expr("icmp"),
-            ),
-            Self::accept_stmt(),
-        ])));
-
+        // ── FAST PATH: established/related lên đầu (90-95% traffic) ──
         batch.add(NfListObject::Rule(Self::rule_with(vec![
             Self::match_stmt(
                 Self::ct_state(),
@@ -192,17 +160,30 @@ impl KernelFirewall {
             Self::accept_stmt(),
         ])));
 
-        // allow ssh port 22
+        // ── DROP invalid conntrack sớm ──
         batch.add(NfListObject::Rule(Self::rule_with(vec![
             Self::match_stmt(
-                Self::payload("tcp", "dport"),
+                Self::ct_state(),
                 stmt::Operator::EQ,
-                Expression::Number(22),
+                Self::str_expr("invalid"),
+            ),
+            Self::drop_stmt(),
+        ])));
+
+        // ── Loopback (local services) ──
+        batch.add(NfListObject::Rule(Self::rule_with(vec![
+            Self::match_stmt(
+                Expression::Named(NamedExpression::Meta(Meta {
+                    key: MetaKey::Iifname,
+                    ..Default::default()
+                })),
+                stmt::Operator::EQ,
+                Self::str_expr("lo"),
             ),
             Self::accept_stmt(),
         ])));
 
-        // drop banned ip
+        // ── DROP banned IPs trước khi check bất kỳ thứ gì khác ──
         batch.add(NfListObject::Rule(Self::rule_with(vec![
             Self::match_stmt(
                 Self::payload("ip", "saddr"),
@@ -212,7 +193,40 @@ impl KernelFirewall {
             Self::drop_stmt(),
         ])));
 
-        // allow proxy dport ? cai nay la port game open
+        // ── Whitelist IP ──
+        batch.add(NfListObject::Rule(Self::rule_with(vec![
+            Self::match_stmt(
+                Self::payload("ip", "saddr"),
+                stmt::Operator::IN,
+                Self::str_expr(&format!("@{SET_WHITE}")),
+            ),
+            Self::accept_stmt(),
+        ])));
+
+        // ── ICMP (ping) ──
+        batch.add(NfListObject::Rule(Self::rule_with(vec![
+            Self::match_stmt(
+                Expression::Named(NamedExpression::Meta(Meta {
+                    key: MetaKey::L4proto,
+                    ..Default::default()
+                })),
+                stmt::Operator::EQ,
+                Self::str_expr("icmp"),
+            ),
+            Self::accept_stmt(),
+        ])));
+
+        // ── SSH port 22 ──
+        batch.add(NfListObject::Rule(Self::rule_with(vec![
+            Self::match_stmt(
+                Self::payload("tcp", "dport"),
+                stmt::Operator::EQ,
+                Expression::Number(22),
+            ),
+            Self::accept_stmt(),
+        ])));
+
+        // ── Game ports ──
         for port in listen_ports {
             batch.add(NfListObject::Rule(Self::rule_with(vec![
                 Self::match_stmt(

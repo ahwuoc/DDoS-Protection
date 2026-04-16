@@ -20,16 +20,30 @@ pub struct ServerConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
     pub servers: Vec<ServerConfig>,
     pub connection: ConnectionConfig,
     pub rate_limit: RateLimitConfig,
     pub protection: ProtectionConfig,
     pub geo: GeoConfig,
+    pub behavioral: BehavioralConfig,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BehavioralConfig {
+    pub enabled: bool,
+    pub min_duration_secs: u64,
+    pub min_bytes_sent: u64,
+    pub min_bytes_recv: u64,
+    pub scoring_threshold: u32,
+    pub ban_on_threshold: bool,
+    pub score_decay_interval_secs: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionConfig {
     pub max_connections_per_ip: usize,
+    pub backend_connect_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,22 +68,37 @@ pub struct GeoConfig {
     pub asn_db_path: String,
     pub country_db_path: String,
     pub datacenter_max_connects_per_minute: u32,
+    #[serde(default = "default_datacenter_keywords")]
+    pub datacenter_keywords: Vec<String>,
+}
+
+fn default_datacenter_keywords() -> Vec<String> {
+    vec![
+        "digitalocean",
+        "amazon",
+        "google",
+        "hetzner",
+        "ovh",
+        "microsoft",
+        "alibaba",
+        "tencent",
+        "vultr",
+        "linode",
+        "choopa",
+        "m247",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            servers: vec![ServerConfig {
-                target_ip: "127.0.0.1".to_string(),
-                allowed_countries: Some(vec!["VN".to_string()]),
-                mappings: vec![Mapping {
-                    name: "Game Port".to_string(),
-                    listen_addr: "0.0.0.0:14443".to_string(),
-                    target_port: 14443,
-                }],
-            }],
+            servers: vec![],
             connection: ConnectionConfig {
                 max_connections_per_ip: 5,
+                backend_connect_timeout_secs: 5,
             },
             rate_limit: RateLimitConfig {
                 window_secs: 2,
@@ -88,6 +117,16 @@ impl Default for AppConfig {
                 asn_db_path: "geoip/GeoLite2-ASN.mmdb".to_string(),
                 country_db_path: "geoip/GeoLite2-Country.mmdb".to_string(),
                 datacenter_max_connects_per_minute: 10,
+                datacenter_keywords: default_datacenter_keywords(),
+            },
+            behavioral: BehavioralConfig {
+                enabled: true,
+                min_duration_secs: 5,
+                min_bytes_sent: 10,
+                min_bytes_recv: 10,
+                scoring_threshold: 10,
+                ban_on_threshold: false,
+                score_decay_interval_secs: 600, // 10 minutes
             },
         }
     }

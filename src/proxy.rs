@@ -23,7 +23,14 @@ pub async fn handle_connection(
 
     let ip_info = match tracker.check_and_track(ip, server_allowed.as_ref()) {
         CheckResult::BannedPermanently(reason) => {
-            ConnectionTracker::persist_ban(&ip.to_string()).await;
+            let ban_info = tracker.get_ip_info(ip);
+            tracker.persist_ban(
+                &ip.to_string(),
+                0,
+                &ban_info.country,
+                &ban_info.asn_org,
+                reason,
+            );
             info!(reason, "[-] Dropped (banned)");
             return Ok(());
         }
@@ -35,8 +42,13 @@ pub async fn handle_connection(
     };
 
     let target_addr = format!("{}:{}", target_ip, mapping.target_port);
-    match TcpStream::connect(&target_addr).await {
-        Ok(mut backend) => {
+    let start_time = std::time::Instant::now();
+    let mut up = 0;
+    let mut down = 0;
+
+    let timeout_secs = _config.connection.backend_connect_timeout_secs;
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), TcpStream::connect(&target_addr)).await {
+        Ok(Ok(mut backend)) => {
             let _ = backend.set_nodelay(true);
             info!(
                 "Accepted connection from {ip} [{} | {}] -> Connected to {target_addr}",
@@ -48,12 +60,17 @@ pub async fn handle_connection(
             let wait_secs = _config.protection.whitelist_after_secs;
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(wait_secs)).await;
-                tracker_clone.mark_as_good(ip_clone).await;
+                if tracker_clone.is_ip_clean(ip_clone) {
+                    tracker_clone.mark_as_good(ip_clone).await;
+                } else {
+                    debug!(ip = %ip_clone, "IP not clean enough for auto-whitelist - remains in untrusted state");
+                }
             });
 
             match copy_bidirectional(&mut client, &mut backend).await {
-                Ok((up, down)) => {
-                    debug!(up_bytes = up, down_bytes = down, "Disconnected");
+                Ok((u, d)) => {
+                    up = u;
+                    down = d;
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -63,14 +80,16 @@ pub async fn handle_connection(
                 }
             }
         }
-        Err(e) => {
-            error!(
-                target = %target_addr,
-                error = %e,
-                "[ERR] Backend connection failed"
-            );
+        Ok(Err(e)) => {
+            error!(target = %target_addr, error = %e, "[ERR] Backend connection failed");
+        }
+        Err(_) => {
+            error!(target = %target_addr, timeout = %timeout_secs, "[ERR] Backend connection timed out");
         }
     }
+
+    let duration = start_time.elapsed();
+    tracker.record_connection_report(ip, duration, up, down);
     tracker.release_connection(ip);
     Ok(())
 }
