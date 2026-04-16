@@ -155,7 +155,7 @@ pub fn draw_monitor(f: &mut Frame, tracker: &ConnectionTracker, app: &mut App) {
     f.render_stateful_widget(table, chunks[2], &mut app.table_state);
 
     let footer = Paragraph::new(Line::from(Span::styled(
-        " [Up/Down] Select  [Enter] Detailed Info  [Q] Back",
+        " [Up/Down] Select  [Enter] Detailed Info  [U] Unban IP  [Q] Back",
         label_style(Color::DarkGray),
     )))
     .block(

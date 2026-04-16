@@ -59,6 +59,16 @@ pub fn run_menu(tracker: Arc<ConnectionTracker>) -> Result<()> {
                                 }
                             }
                         }
+                        KeyCode::Char('u' | 'U') => {
+                            if app.view == View::Monitor {
+                                let tracked = tracker.list_tracked_ips();
+                                if let Some(idx) = app.table_state.selected() {
+                                    if let Some(snapshot) = tracked.get(idx) {
+                                        let _ = tracker.unban(snapshot.ip);
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }

@@ -164,6 +164,11 @@ impl ConnectionTracker {
         if let Err(e) = self.db.unban_ip(&ip.to_string()) {
             warn!("Failed to remove {ip} from DB: {e}");
         }
+        if let Some(mut s) = self.stats.get_mut(&ip) {
+            s.status = IpStatus::Normal;
+            s.strikes = 0;
+            s.behavior_score = 0.0;
+        }
         Ok(())
     }
 
@@ -538,11 +543,18 @@ impl ConnectionTracker {
             .iter()
             .map(|s| s.value().active_connections)
             .sum();
-        (
-            self.permanent_bans.len(),
-            self.whitelist.len(),
-            total_active,
-        )
+
+        let mut banned_ips = std::collections::HashSet::new();
+        for ip in self.permanent_bans.iter() {
+            banned_ips.insert(*ip);
+        }
+        for entry in self.stats.iter() {
+            if entry.value().status == IpStatus::Banned {
+                banned_ips.insert(*entry.key());
+            }
+        }
+
+        (banned_ips.len(), self.whitelist.len(), total_active)
     }
 
     pub fn get_ip_stats(&self, ip: IpAddr) -> Option<IpStats> {
