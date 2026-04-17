@@ -1,5 +1,6 @@
 use crate::config::{AppConfig, Mapping};
-use crate::tracker::{CheckResult, ConnectionTracker};
+use crate::tracker::CheckResult;
+use crate::engine::ConnectionTracker;
 use std::sync::Arc;
 use tokio::io::copy_bidirectional;
 use tokio::net::TcpStream;
@@ -21,21 +22,23 @@ pub async fn handle_connection(
 ) -> Result<()> {
     let _ = client.set_nodelay(true);
 
-    let ip_info = match tracker.check_and_track(ip, mapping.target_port, server_allowed.as_ref()) {
+    let ip_info = match tracker.check_and_track(ip, mapping.target_port, server_allowed.as_ref()).await {
         CheckResult::BannedPermanently(reason) => {
             let ban_info = tracker.get_ip_info(ip);
+            let reason_str = reason.to_string();
             tracker.persist_ban(
                 &ip.to_string(),
                 0,
                 &ban_info.country,
                 &ban_info.asn_org,
-                reason,
+                &reason_str,
             );
-            info!(reason, "[-] Dropped (banned)");
+            info!(reason = %reason_str, "[-] Dropped (banned)");
             return Ok(());
         }
         CheckResult::Rejected(reason) => {
-            debug!(reason, "[-] Dropped");
+            let reason_str = reason.to_string();
+            debug!(reason = %reason_str, "[-] Dropped");
             return Ok(());
         }
         CheckResult::Allowed(info) => info,

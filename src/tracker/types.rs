@@ -24,6 +24,7 @@ pub struct IpStats {
     pub country: String,
     pub asn_org: String,
     pub last_port: u16,
+    pub last_violation: Instant,
 }
 
 impl Default for IpStats {
@@ -42,15 +43,62 @@ impl Default for IpStats {
             country: String::new(),
             asn_org: String::new(),
             last_port: 0,
+            last_violation: Instant::now(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BanReason {
+    RateLimitPermanent,
+    BehavioralStrikeCheck,
+    BehavioralStrikeLimit,
+    Manual,
+}
+
+impl std::fmt::Display for BanReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            BanReason::RateLimitPermanent => "STRIKE LIMIT -> PERMANENT BAN",
+            BanReason::BehavioralStrikeCheck => "BEHAVIORAL_STRIKE_LIMIT_CHECK",
+            BanReason::BehavioralStrikeLimit => "BEHAVIORAL_STRIKE_LIMIT",
+            BanReason::Manual => "MANUAL_BAN",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RejectionReason {
+    GeoBlocked,
+    DatacenterRateLimit,
+    TempBlacklisted,
+    RateLimit,
+    MaxConcurrency,
+    BehavioralAnomaly,
+    SystemOverload,
+}
+
+impl std::fmt::Display for RejectionReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            RejectionReason::GeoBlocked => "GEO BLOCKED",
+            RejectionReason::DatacenterRateLimit => "DATACENTER RATE LIMIT",
+            RejectionReason::TempBlacklisted => "TEMP BLACKLISTED",
+            RejectionReason::RateLimit => "RATE LIMIT",
+            RejectionReason::MaxConcurrency => "MAX CONCURRENCY",
+            RejectionReason::BehavioralAnomaly => "BEHAVIORAL ANOMALY",
+            RejectionReason::SystemOverload => "SYSTEM OVERLOAD",
+        };
+        write!(f, "{}", s)
     }
 }
 
 #[derive(Debug, PartialEq)]
 pub enum CheckResult {
     Allowed(IpInfo),
-    Rejected(&'static str),
-    BannedPermanently(&'static str),
+    Rejected(RejectionReason),
+    BannedPermanently(BanReason),
 }
 
 #[derive(Debug, PartialEq, Clone)]

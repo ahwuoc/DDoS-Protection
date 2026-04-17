@@ -27,6 +27,7 @@ pub struct AppConfig {
     pub protection: ProtectionConfig,
     pub geo: GeoConfig,
     pub behavioral: BehavioralConfig,
+    pub tuning: KernelTuningConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,6 +39,17 @@ pub struct BehavioralConfig {
     pub scoring_threshold: u32,
     pub ban_on_threshold: bool,
     pub score_decay_interval_secs: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KernelTuningConfig {
+    pub enabled: bool,
+    pub nf_conntrack_max: u32,
+    pub tcp_syncookies: bool,
+    pub tcp_max_syn_backlog: u32,
+    pub somaxconn: u32,
+    pub tcp_timeout_established: u32,
+    pub tcp_timeout_syn_recv: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -60,6 +72,7 @@ pub struct ProtectionConfig {
     pub strikes_before_ban: u32,
     pub max_syn_per_sec: u32,
     pub subnet_strike_threshold: u32,
+    pub strike_forgiveness_interval_secs: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -111,6 +124,7 @@ impl Default for AppConfig {
                 strikes_before_ban: 3,
                 max_syn_per_sec: 100,
                 subnet_strike_threshold: 3,
+                strike_forgiveness_interval_secs: 300,
             },
             geo: GeoConfig {
                 enabled: false,
@@ -127,6 +141,15 @@ impl Default for AppConfig {
                 scoring_threshold: 10,
                 ban_on_threshold: false,
                 score_decay_interval_secs: 600, // 10 minutes
+            },
+            tuning: KernelTuningConfig {
+                enabled: true,
+                nf_conntrack_max: 2000000,
+                tcp_syncookies: true,
+                tcp_max_syn_backlog: 65535,
+                somaxconn: 65535,
+                tcp_timeout_established: 1200,
+                tcp_timeout_syn_recv: 20,
             },
         }
     }

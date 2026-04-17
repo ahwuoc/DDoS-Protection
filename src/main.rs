@@ -7,9 +7,8 @@ use tracing::{error, info, warn};
 
 use proxy_forward::config::AppConfig;
 use proxy_forward::db::IpDatabase;
-use proxy_forward::kernel::KernelFirewall;
-use proxy_forward::proxy;
-use proxy_forward::tracker::ConnectionTracker;
+use proxy_forward::kernel::{KernelFirewall, SysctlTuner};
+use proxy_forward::engine::ConnectionTracker;
 use proxy_forward::ui;
 
 // ── CLI ─────────────────────────────────────────────────
@@ -25,7 +24,13 @@ struct Cli {}
 async fn main() -> Result<()> {
     let _cli = Cli::parse();
 
-    init_logging(true);
+    // 1. Optimization: Increase File Descriptor limits
+    if let Err(e) = rlimit::increase_nofile_limit(65535) {
+        eprintln!("Warning: Failed to increase FD limit: {e}");
+    }
+
+    // 2. Optimization: Non-blocking logging
+    let _guard = init_logging(true);
 
     info!("Starting NRO Multi-Port Anti-Spam Proxy...");
 
@@ -56,7 +61,8 @@ async fn main() -> Result<()> {
     tracker.spawn_ban_flush_task();
 
     spawn_config_watcher(tracker.clone());
-    spawn_proxy_listeners_from_db(&db_servers, &config, tracker.clone());
+    tracker.refresh_proxy_listeners();
+    tracker.spawn_dynamic_refresh_task();
 
     // Start interactive menu (blocks until Q is pressed)
     if let Err(e) = ui::run_menu(tracker.clone()) {
@@ -75,27 +81,27 @@ async fn main() -> Result<()> {
 
 // ── Initialization helpers ──────────────────────────────
 
-fn init_logging(menu_mode: bool) {
+fn init_logging(menu_mode: bool) -> Option<tracing_appender::non_blocking::WorkerGuard> {
     let filter =
         tracing_subscriber::EnvFilter::from_default_env().add_directive("info".parse().unwrap());
+    
     if menu_mode {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("proxy.log")
-            .unwrap();
+        let file_appender = tracing_appender::rolling::never(".", "proxy.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_target(false)
             .with_ansi(false)
-            .with_writer(file)
+            .with_writer(non_blocking)
             .init();
+        Some(guard)
     } else {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_target(false)
             .init();
+        None
     }
 }
 
@@ -109,6 +115,9 @@ fn collect_listen_ports_from_servers(servers: &[proxy_forward::config::ServerCon
 
 fn init_firewall(ports: &[u16], config: &AppConfig) -> KernelFirewall {
     info!("Initializing Kernel Firewall for {} ports...", ports.len());
+
+    // Tune kernel parameters
+    let _ = SysctlTuner::tune_all(&config.tuning);
 
     let fw = KernelFirewall::new(ports.to_vec());
 
@@ -149,87 +158,4 @@ fn spawn_config_watcher(tracker: Arc<ConnectionTracker>) {
             tracker.reload_config(Arc::new(new_cfg));
         }
     });
-}
-
-fn spawn_proxy_listeners_from_db(
-    servers: &[proxy_forward::config::ServerConfig],
-    config: &AppConfig,
-    tracker: Arc<ConnectionTracker>,
-) {
-    for server in servers {
-        let target_ip: Arc<str> = server.target_ip.clone().into();
-        let allowed: Option<Arc<Vec<String>>> = server.allowed_countries.clone().map(Arc::new);
-
-        for mapping in &server.mappings {
-            let mapping = mapping.clone();
-            let tracker = tracker.clone();
-            let config_arc = Arc::new(config.clone());
-            let target_ip = target_ip.clone();
-            let allowed = allowed.clone();
-
-            info!(
-                mapping = %mapping.name,
-                listen = %mapping.listen_addr,
-                target = %format!("{}:{}", target_ip, mapping.target_port),
-                "Starting proxy task"
-            );
-
-            tokio::spawn(async move {
-                run_listener(mapping, tracker, config_arc, target_ip, allowed).await;
-            });
-        }
-    }
-}
-
-async fn run_listener(
-    mapping: proxy_forward::config::Mapping,
-    tracker: Arc<ConnectionTracker>,
-    config: Arc<AppConfig>,
-    target_ip: Arc<str>,
-    allowed: Option<Arc<Vec<String>>>,
-) {
-    let listener = match tokio::net::TcpListener::bind(&mapping.listen_addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!(name = %mapping.name, error = %e, "Failed to bind listener");
-            return;
-        }
-    };
-
-    loop {
-        match listener.accept().await {
-            Ok((socket, addr)) => {
-                let ip = addr.ip();
-                if tracker.is_permanently_banned(ip) {
-                    drop(socket);
-                    continue;
-                }
-
-                let mapping = mapping.clone();
-                let tracker = tracker.clone();
-                let config = config.clone();
-                let target_ip = target_ip.clone();
-                let allowed = allowed.clone();
-
-                tokio::spawn(async move {
-                    if let Err(e) = proxy::handle_connection(
-                        socket,
-                        ip,
-                        tracker,
-                        config,
-                        target_ip.to_string(),
-                        mapping,
-                        allowed.as_deref().cloned(),
-                    )
-                    .await
-                    {
-                        error!(error = %e, "Connection error");
-                    }
-                });
-            }
-            Err(e) => {
-                error!(name = %mapping.name, error = %e, "Accept error");
-            }
-        }
-    }
 }

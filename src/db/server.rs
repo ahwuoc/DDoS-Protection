@@ -20,8 +20,6 @@ pub struct ServerInfo {
 // ── CRUD ────────────────────────────────────────────────
 
 impl IpDatabase {
-    /// Add a new server with its allowed countries and port mappings.
-    /// Returns the new server ID.
     pub fn add_server(
         &self,
         name: &str,
@@ -54,8 +52,6 @@ impl IpDatabase {
         info!(id = server_id, name, target_ip, "Added server to DB");
         Ok(server_id)
     }
-
-    /// Remove a server and all its related data (CASCADE).
     pub fn remove_server(&self, server_id: i64) -> Result<()> {
         let conn = self.lock_conn()?;
         conn.execute("DELETE FROM servers WHERE id = ?1", params![server_id])?;
@@ -63,7 +59,6 @@ impl IpDatabase {
         Ok(())
     }
 
-    /// Toggle server enabled/disabled.
     pub fn set_server_enabled(&self, server_id: i64, enabled: bool) -> Result<()> {
         let conn = self.lock_conn()?;
         conn.execute(
@@ -73,7 +68,6 @@ impl IpDatabase {
         Ok(())
     }
 
-    /// Load all enabled servers as `ServerConfig` structs.
     pub fn load_servers(&self) -> Result<Vec<ServerConfig>> {
         let conn = self.lock_conn()?;
 
@@ -158,11 +152,9 @@ impl IpDatabase {
             Ok(c) => c,
             Err(_) => return false,
         };
-        conn.query_row(
-            "SELECT COUNT(*) FROM servers",
-            [],
-            |row| row.get::<_, usize>(0),
-        )
+        conn.query_row("SELECT COUNT(*) FROM servers", [], |row| {
+            row.get::<_, usize>(0)
+        })
         .unwrap_or(0)
             > 0
     }

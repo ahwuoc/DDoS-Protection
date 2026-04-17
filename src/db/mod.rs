@@ -85,8 +85,9 @@ impl IpDatabase {
         Ok(())
     }
 
-    /// Helper: lock the DB connection.
     pub(crate) fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn.lock().map_err(|e| anyhow::anyhow!("DB lock: {e}"))
+        self.conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("DB lock: {e}"))
     }
 }

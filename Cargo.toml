@@ -21,3 +21,5 @@ crossterm = "0.25"
 ratatui = "0.26"
 arc-swap = "1.9.1"
 rusqlite = { version = "0.31", features = ["bundled"] }
+tracing-appender = "0.2"
+rlimit = "0.10"

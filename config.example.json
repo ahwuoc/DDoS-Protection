@@ -1,36 +1,28 @@
 {
   "connection": {
-    "max_connections_per_ip": 8,
+    "max_connections_per_ip": 5,
     "backend_connect_timeout_secs": 5
   },
   "rate_limit": {
     "window_secs": 2,
-    "max_connects_per_window": 6,
-    "max_connects_per_minute": 60
+    "max_connects_per_window": 8,
+    "max_connects_per_minute": 100
   },
   "protection": {
-    "blacklist_duration_secs": 120,
+    "blacklist_duration_secs": 30,
     "whitelist_after_secs": 30,
-    "strikes_before_ban": 2,
-    "max_syn_per_sec": 50000,
+    "strikes_before_ban": 3,
+    "max_syn_per_sec": 100,
     "subnet_strike_threshold": 3
-  },
-  "behavioral": {
-    "enabled": true,
-    "min_duration_secs": 5,
-    "min_bytes_sent": 10,
-    "min_bytes_recv": 10,
-    "scoring_threshold": 10,
-    "ban_on_threshold": true,
-    "score_decay_interval_secs": 600
   },
   "geo": {
     "enabled": true,
     "asn_db_path": "geoip/GeoLite2-ASN.mmdb",
     "country_db_path": "geoip/GeoLite2-Country.mmdb",
-    "datacenter_max_connects_per_minute": 3,
+    "datacenter_max_connects_per_minute": 10,
     "datacenter_keywords": [
       "digitalocean",
+      "amazon",
       "google",
       "hetzner",
       "ovh",
@@ -40,26 +32,16 @@
       "vultr",
       "linode",
       "choopa",
-      "m247",
-      "contabo",
-      "scaleway",
-      "oracle",
-      "leaseweb",
-      "cogent",
-      "psychz",
-      "quadranet",
-      "hostwinds",
-      "buyvm",
-      "ionos",
-      "kamatera",
-      "cherry servers",
-      "hostinger",
-      "racknerd",
-      "cloudflare",
-      "akamai",
-      "fastly",
-      "huawei cloud",
-      "ucloud"
+      "m247"
     ]
+  },
+  "behavioral": {
+    "enabled": true,
+    "min_duration_secs": 5,
+    "min_bytes_sent": 10,
+    "min_bytes_recv": 10,
+    "scoring_threshold": 10,
+    "ban_on_threshold": false,
+    "score_decay_interval_secs": 600
   }
 }

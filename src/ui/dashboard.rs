@@ -1,4 +1,4 @@
-use crate::tracker::ConnectionTracker;
+use crate::engine::ConnectionTracker;
 use crate::ui::app::App;
 use crate::ui::theme::*;
 use ratatui::{
@@ -58,7 +58,7 @@ pub fn draw_dashboard(f: &mut Frame, tracker: &ConnectionTracker, app: &App) {
         Line::from(""),
         hotkey_line("[M]", "  Monitor realtime"),
         Line::from(""),
-        hotkey_line("[R]", "  Refresh stats"),
+        hotkey_line("[R]", "  Hot-Reload servers"),
         Line::from(""),
         hotkey_line("[Q]", "  Quit panel"),
         Line::from(""),

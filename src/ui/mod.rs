@@ -1,4 +1,4 @@
-use crate::tracker::ConnectionTracker;
+use crate::engine::ConnectionTracker;
 use anyhow::Result;
 use crossterm::{
     ExecutableCommand,
@@ -103,7 +103,10 @@ pub fn run_menu(tracker: Arc<ConnectionTracker>) -> Result<()> {
                         app.table_state.select(Some(0));
                         app.status_msg = "Monitor active".to_string();
                     }
-                    KeyCode::Char('r' | 'R') => app.status_msg = "Refreshed".to_string(),
+                    KeyCode::Char('r' | 'R') => {
+                        tracker.refresh_proxy_listeners();
+                        app.status_msg = "Servers Hot-Reloaded (Synced with DB)".to_string();
+                    }
                     KeyCode::Char('q' | 'Q') | KeyCode::Esc => break,
                     _ => {}
                 },
